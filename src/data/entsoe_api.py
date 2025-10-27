@@ -2,48 +2,52 @@
 from __future__ import annotations
 import os
 import pandas as pd
-from entsoe import EntsoePandasClient
 from zoneinfo import ZoneInfo
+from entsoe import EntsoePandasClient
 from entsoe.exceptions import NoMatchingDataError
 
-IE = "IE"  # Ireland bidding zone / country code
-
+# entsoe-py expects timestamps in Europe/Brussels (per docs/examples)
+TZ_QUERY = ZoneInfo("Europe/Brussels")
 
 class Entsoe:
-    def __init__(self, token: str | None = None, tz_local: str = "Europe/Dublin"):
+    """Thin wrapper around entsoe-py with sane defaults for Ireland (IE/IE(SEM))."""
+
+    def __init__(self, token: str | None = None, area: str = "IE(SEM)"):
         token = token or os.getenv("ENTSOE_TOKEN")
         if not token:
             raise RuntimeError("ENTSOE_TOKEN not set. Put it in .env or st.secrets.")
         self.client = EntsoePandasClient(api_key=token)
-        self.tz_local = ZoneInfo(tz_local)
-        self.tz_utc = ZoneInfo("UTC")
+        # Prefer explicit IE(SEM). If your entsoe-py is older, 'IE' also works via mapping.
+        self.area = area  # "IE(SEM)" or "IE"
 
-    def _utc(self, dt_like) -> pd.Timestamp:
-        """Convert any datetime-like to tz-aware UTC Timestamp as required by entsoe-py."""
+    def _brussels(self, dt_like) -> pd.Timestamp:
+        """Return tz-aware Timestamp in Europe/Brussels as required by entsoe-py."""
         ts = pd.Timestamp(dt_like)
         if ts.tzinfo is None:
-            ts = ts.tz_localize(self.tz_local).tz_convert(self.tz_utc)
-        else:
-            ts = ts.tz_convert(self.tz_utc)
-        return ts
+            return ts.tz_localize(TZ_QUERY)
+        return ts.tz_convert(TZ_QUERY)
 
     # ---------- Prices ----------
     def day_ahead_prices(self, start: str, end: str) -> pd.Series:
         s = self.client.query_day_ahead_prices(
-            IE,
-            start=self._utc(start),
-            end=self._utc(end),
+            self.area,
+            start=self._brussels(start),
+            end=self._brussels(end),
         )
+        if s is None or len(s) == 0:
+            raise NoMatchingDataError("No day-ahead prices returned.")
         s.name = "dam_eur_mwh"
         return s
 
     # ---------- Load forecast ----------
     def load_forecast(self, start: str, end: str) -> pd.Series:
         s = self.client.query_load_forecast(
-            IE,
-            start=self._utc(start),
-            end=self._utc(end),
+            self.area,
+            start=self._brussels(start),
+            end=self._brussels(end),
         )
+        if s is None or len(s) == 0:
+            raise NoMatchingDataError("No load forecast returned.")
         s.name = "load_forecast_mw"
         return s
 
@@ -59,15 +63,12 @@ class Entsoe:
         def _try(psr: str) -> pd.Series:
             try:
                 s = self.client.query_generation_forecast(
-                    IE,
-                    start=self._utc(start),
-                    end=self._utc(end),
+                    self.area,
+                    start=self._brussels(start),
+                    end=self._brussels(end),
                     psr_type=psr,   # B16=Solar, B19=Wind Onshore, B18=Wind Offshore
                 )
-                # entsoe-py may return None/empty on gaps
-                if s is None:
-                    return pd.Series(dtype=float)
-                return s
+                return s if s is not None else pd.Series(dtype=float)
             except NoMatchingDataError:
                 return pd.Series(dtype=float)
 
@@ -84,9 +85,7 @@ class Entsoe:
             axis=1,
         ).sort_index()
 
-        # Sum on/offshore when available
-        if "wind_onshore_mw" in df or "wind_offshore_mw" in df:
-            cols = [c for c in ["wind_onshore_mw", "wind_offshore_mw"] if c in df]
-            if cols:
-                df["wind_total_mw"] = df[cols].sum(axis=1, min_count=1)
+        cols = [c for c in ["wind_onshore_mw", "wind_offshore_mw"] if c in df]
+        if cols:
+            df["wind_total_mw"] = df[cols].sum(axis=1, min_count=1)
         return df
