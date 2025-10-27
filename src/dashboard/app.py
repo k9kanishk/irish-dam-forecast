@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
+import time
 import yaml
 import pandas as pd
 import streamlit as st
@@ -21,9 +22,32 @@ load_dotenv()  # local dev uses .env; on Streamlit Cloud we'll use st.secrets
 DATA_PATH = Path("data/processed/train.parquet")
 
 
+def _as_date(s):
+    """Parse s to date; return None if missing/blank/invalid."""
+    if s is None or (isinstance(s, str) and s.strip() == ""):
+        return None
+    try:
+        return pd.to_datetime(s).date()
+    except Exception:
+        return None
+
+
+def _chunk_edges(start_date, end_date, days=180):
+    """Yield [start,end] chunks inclusive with <= days span."""
+    s = pd.to_datetime(start_date).date()
+    e = pd.to_datetime(end_date).date()
+    step = pd.Timedelta(days=days)
+    cur = pd.to_datetime(s)
+    last = pd.to_datetime(e)
+    while cur <= last:
+        nxt = min(cur + step, last)
+        yield str(cur.date()), str(nxt.date())
+        cur = nxt + pd.Timedelta(days=1)
+
+
 @st.cache_data(show_spinner=True)
 def ensure_dataset():
-    """Build data/processed/train.parquet once, using ENTSO-E + Open-Meteo."""
+    """Build data/processed/train.parquet once, using ENTSO-E + Open-Meteo, chunked to respect API limits."""
     if DATA_PATH.exists():
         return  # already built
 
@@ -37,46 +61,71 @@ def ensure_dataset():
     cfg = yaml.safe_load(open("config.yaml"))
 
     # ---- Guard against missing/blank dates in config.yaml ----
-    def _as_date(s):
-        """Parse s to date; return None if missing/blank/invalid."""
-        if s is None or (isinstance(s, str) and s.strip() == ""):
-            return None
-        try:
-            return pd.to_datetime(s).date()
-        except Exception:
-            return None
-
     start_cfg = _as_date(cfg.get("train", {}).get("start"))
     end_cfg = _as_date(cfg.get("train", {}).get("end"))
-
     # If end missing -> today (UTC). If start missing -> last 90 days from end.
     if not end_cfg:
         end_cfg = datetime.now(timezone.utc).date()
     if not start_cfg:
         start_cfg = (pd.to_datetime(end_cfg) - pd.Timedelta(days=90)).date()
+    start_all = str(start_cfg)
+    end_all = str(end_cfg)
 
-    # Use these strings for all queries
-    start = str(start_cfg)
-    end = str(end_cfg)
-
-    # Token priority: ENV (local) -> Streamlit secrets (cloud)
+    # Token: ENV first, then Streamlit secrets
     token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
     if not token:
-        st.error(
-            "ENTSOE_TOKEN not found. Set it in .env (local) or in Streamlit → Settings → Secrets."
-        )
+        st.error("ENTSOE_TOKEN not found. Set it in .env (local) or in Streamlit → Settings → Secrets.")
         st.stop()
 
     ent = Entsoe(token=token)
 
-    # Pull data
-    dam = ent.day_ahead_prices(start=start, end=end)
-    load_fc = ent.load_forecast(start=start, end=end)
-    ws = ent.wind_solar_forecast(start=start, end=end)
+    # ---- Chunked pulls to avoid 400 from ENTSO-E range caps ----
+    def _pull_series(method_name):
+        parts = []
+        for s, e in _chunk_edges(start_all, end_all, days=180):
+            for attempt in range(3):
+                try:
+                    srs = getattr(ent, method_name)(start=s, end=e)
+                    parts.append(srs)
+                    break
+                except Exception as ex:
+                    # simple backoff on 400/429/5xx
+                    time.sleep(1.5 * (attempt + 1))
+                    if attempt == 2:
+                        raise ex
+        if not parts:
+            return pd.Series(dtype=float)
+        srs = pd.concat(parts).sort_index()
+        srs = srs[~srs.index.duplicated(keep="last")]
+        return srs
 
+    def _pull_frame(method_name):
+        parts = []
+        for s, e in _chunk_edges(start_all, end_all, days=180):
+            for attempt in range(3):
+                try:
+                    dfp = getattr(ent, method_name)(start=s, end=e)
+                    parts.append(dfp)
+                    break
+                except Exception as ex:
+                    time.sleep(1.5 * (attempt + 1))
+                    if attempt == 2:
+                        raise ex
+        if not parts:
+            return pd.DataFrame()
+        df = pd.concat(parts).sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        return df
+
+    st.caption(f"Fetching ENTSO-E (chunked): {start_all} → {end_all}")
+    dam = _pull_series("day_ahead_prices")
+    load_fc = _pull_series("load_forecast")
+    ws = _pull_frame("wind_solar_forecast")
+
+    # Weather in one go (Open-Meteo tolerates larger ranges)
     lat = cfg["weather"]["lat"]
     lon = cfg["weather"]["lon"]
-    weather = fetch_hourly(lat, lon, start, end)
+    weather = fetch_hourly(lat, lon, start_all, end_all)
 
     # Features + target
     X = build_feature_table(dam, load_fc, ws, weather)
