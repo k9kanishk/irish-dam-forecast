@@ -1,14 +1,21 @@
 # src/dashboard/app.py
 
-# --- minimal bootstrap (imports first!) ---
+# --- bootstrap (imports first!) ---
 import os
+import sys
 from pathlib import Path
 import yaml
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-load_dotenv()  # local dev: reads .env; on Streamlit Cloud use st.secrets
+# Ensure repo root is on sys.path so `import src...` works in Streamlit Cloud/Codespaces
+APP_FILE = Path(__file__).resolve()
+REPO_ROOT = APP_FILE.parents[2]  # .../irish-dam-forecast
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+load_dotenv()  # local dev uses .env; on Streamlit Cloud use st.secrets
 
 DATA_PATH = Path("data/processed/train.parquet")
 
@@ -19,7 +26,7 @@ def ensure_dataset():
     if DATA_PATH.exists():
         return  # already built
 
-    # Heavy imports only when needed
+    # Heavy imports only when needed (after sys.path fix above)
     from src.data.entsoe_api import Entsoe
     from src.data.weather import fetch_hourly
     from src.features.build_features import build_feature_table
@@ -29,11 +36,18 @@ def ensure_dataset():
 
     # Token priority: ENV (local) -> Streamlit secrets (cloud)
     token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
+    if not token:
+        st.error(
+            "ENTSOE_TOKEN not found. Set it in .env (local) or in Streamlit → Settings → Secrets."
+        )
+        st.stop()
+
     ent = Entsoe(token=token)
 
     start = cfg["train"]["start"]
     end = cfg["train"]["end"]
 
+    # Pull data
     dam = ent.day_ahead_prices(start, end)
     load_fc = ent.load_forecast(start, end)
     ws = ent.wind_solar_forecast(start, end)
@@ -42,6 +56,7 @@ def ensure_dataset():
     lon = cfg["weather"]["lon"]
     weather = fetch_hourly(lat, lon, start, end)
 
+    # Features + target
     X = build_feature_table(dam, load_fc, ws, weather)
     y = make_day_ahead_target(dam).reindex(X.index)
 
