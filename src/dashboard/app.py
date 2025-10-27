@@ -1,3 +1,44 @@
+# --- add near the top of src/dashboard/app.py (new branch, via PR) ---
+import os
+from pathlib import Path
+import pandas as pd
+
+DATA_PATH = Path("data/processed/train.parquet")
+
+@st.cache_data(show_spinner=True)
+def ensure_dataset():
+    if DATA_PATH.exists():
+        return
+    # Lazy build: call the same code the scripts use
+    from src.data.entsoe_api import Entsoe
+    from src.data.weather import fetch_hourly
+    from src.features.build_features import build_feature_table
+    from src.features.targets import make_day_ahead_target
+    import yaml, os
+    from dotenv import load_dotenv; load_dotenv()
+
+    cfg = yaml.safe_load(open("config.yaml"))
+    ent = Entsoe()
+    # Pull a modest window so cold starts are fast
+    start = cfg["train"]["start"]
+    end   = cfg["train"]["end"]
+
+    dam = ent.day_ahead_prices(start, end)
+    load_fc = ent.load_forecast(start, end)
+    ws = ent.wind_solar_forecast(start, end)
+
+    lat = cfg["weather"]["lat"]; lon = cfg["weather"]["lon"]
+    weather = fetch_hourly(lat, lon, start, end)
+
+    X = build_feature_table(dam, load_fc, ws, weather)
+    y = make_day_ahead_target(dam).reindex(X.index)
+    df = X.copy(); df["target"] = y
+    Path("data/processed").mkdir(parents=True, exist_ok=True)
+    df.dropna().to_parquet(DATA_PATH)
+
+ensure_dataset()
+
+
 
 import streamlit as st
 import pandas as pd
