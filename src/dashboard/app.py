@@ -3,9 +3,9 @@
 # --- bootstrap (imports first!) ---
 import os
 import sys
+import time
 from pathlib import Path
 from datetime import datetime, timezone
-import time
 import yaml
 import pandas as pd
 import streamlit as st
@@ -32,8 +32,8 @@ def _as_date(s):
         return None
 
 
-def _chunk_edges(start_date, end_date, days=180):
-    """Yield [start,end] chunks inclusive with <= days span."""
+def _chunk_edges(start_date, end_date, days=120):
+    """Yield [start,end] chunks inclusive with <= days span (ENTSO-E safe)."""
     s = pd.to_datetime(start_date).date()
     e = pd.to_datetime(end_date).date()
     step = pd.Timedelta(days=days)
@@ -47,7 +47,7 @@ def _chunk_edges(start_date, end_date, days=180):
 
 @st.cache_data(show_spinner=True)
 def ensure_dataset():
-    """Build data/processed/train.parquet once, using ENTSO-E + Open-Meteo, chunked to respect API limits."""
+    """Build data/processed/train.parquet once, using ENTSO-E + Open-Meteo, chunked and tolerant to empty chunks."""
     if DATA_PATH.exists():
         return  # already built
 
@@ -56,14 +56,13 @@ def ensure_dataset():
     from src.data.weather import fetch_hourly
     from src.features.build_features import build_feature_table
     from src.features.targets import make_day_ahead_target
+    # import here to avoid hard dependency if entsoe-py changes
+    from entsoe.exceptions import NoMatchingDataError
 
-    # Load config
+    # Load config and compute a safe window if missing
     cfg = yaml.safe_load(open("config.yaml"))
-
-    # ---- Guard against missing/blank dates in config.yaml ----
     start_cfg = _as_date(cfg.get("train", {}).get("start"))
     end_cfg = _as_date(cfg.get("train", {}).get("end"))
-    # If end missing -> today (UTC). If start missing -> last 90 days from end.
     if not end_cfg:
         end_cfg = datetime.now(timezone.utc).date()
     if not start_cfg:
@@ -79,20 +78,30 @@ def ensure_dataset():
 
     ent = Entsoe(token=token)
 
-    # ---- Chunked pulls to avoid 400 from ENTSO-E range caps ----
+    # ---- Chunked pulls to avoid 400 and tolerate empty chunks ----
     def _pull_series(method_name):
         parts = []
-        for s, e in _chunk_edges(start_all, end_all, days=180):
+        empty_spans = []
+        for s, e in _chunk_edges(start_all, end_all, days=120):
             for attempt in range(3):
                 try:
                     srs = getattr(ent, method_name)(start=s, end=e)
-                    parts.append(srs)
+                    if srs is not None and len(srs) > 0:
+                        parts.append(srs)
+                    else:
+                        empty_spans.append((s, e))
                     break
-                except Exception as ex:
+                except NoMatchingDataError:
+                    empty_spans.append((s, e))
+                    break
+                except Exception:
                     # simple backoff on 400/429/5xx
                     time.sleep(1.5 * (attempt + 1))
                     if attempt == 2:
-                        raise ex
+                        raise
+        if empty_spans and not parts:
+            st.warning(f"ENTSO-E returned no data for {method_name} in window {start_all} → {end_all}. "
+                       f"Try narrowing the window in config.yaml (e.g., last 90–180 days).")
         if not parts:
             return pd.Series(dtype=float)
         srs = pd.concat(parts).sort_index()
@@ -101,16 +110,25 @@ def ensure_dataset():
 
     def _pull_frame(method_name):
         parts = []
-        for s, e in _chunk_edges(start_all, end_all, days=180):
+        empty_spans = []
+        for s, e in _chunk_edges(start_all, end_all, days=120):
             for attempt in range(3):
                 try:
                     dfp = getattr(ent, method_name)(start=s, end=e)
-                    parts.append(dfp)
+                    if dfp is not None and not dfp.empty:
+                        parts.append(dfp)
+                    else:
+                        empty_spans.append((s, e))
                     break
-                except Exception as ex:
+                except NoMatchingDataError:
+                    empty_spans.append((s, e))
+                    break
+                except Exception:
                     time.sleep(1.5 * (attempt + 1))
                     if attempt == 2:
-                        raise ex
+                        raise
+        if empty_spans and not parts:
+            st.warning(f"ENTSO-E returned no data for {method_name} in window {start_all} → {end_all}.")
         if not parts:
             return pd.DataFrame()
         df = pd.concat(parts).sort_index()
@@ -121,6 +139,16 @@ def ensure_dataset():
     dam = _pull_series("day_ahead_prices")
     load_fc = _pull_series("load_forecast")
     ws = _pull_frame("wind_solar_forecast")
+
+    # Hard guards: we need at least prices and load forecast to proceed
+    if dam.empty:
+        st.error("No day-ahead prices returned for the selected window. "
+                 "Set a recent window in config.yaml (e.g., last 90–180 days) and rerun.")
+        st.stop()
+    if load_fc.empty:
+        st.error("No load forecast returned for the selected window. "
+                 "Try a recent window in config.yaml and rerun.")
+        st.stop()
 
     # Weather in one go (Open-Meteo tolerates larger ranges)
     lat = cfg["weather"]["lat"]
