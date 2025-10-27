@@ -21,7 +21,6 @@ class Entsoe:
         # Normalize to timezone-aware UTC timestamps (library requires tz-aware UTC)
         ts = pd.Timestamp(dt_like)
         if ts.tzinfo is None:
-            # assume local tz -> convert to UTC
             ts = ts.tz_localize(self.tz_local).tz_convert(self.tz_utc)
         else:
             ts = ts.tz_convert(self.tz_utc)
@@ -42,6 +41,7 @@ class Entsoe:
             start=self._utc(start),
             end=self._utc(end),
         )
+        # Flatten MultiIndex columns like ('DayAheadGenerationForecast', 'Solar')
         df.columns = [f"{a}_{b}".lower().replace(" ", "_") for a, b in df.columns]
         return df
 
