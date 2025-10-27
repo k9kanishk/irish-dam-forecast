@@ -38,6 +38,7 @@ def ensure_dataset():
 
 ensure_dataset()
 
+df = pd.read_parquet(DATA_PATH)
 
 
 import streamlit as st
