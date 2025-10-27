@@ -34,6 +34,27 @@ def ensure_dataset():
 
     cfg = yaml.safe_load(open("config.yaml"))
 
+    # inside ensure_dataset(), after loading cfg
+from datetime import datetime, timedelta, timezone
+
+def _as_date(s):  # returns None if empty/invalid
+    try:
+        return pd.to_datetime(s).date()
+    except Exception:
+        return None
+
+start_cfg = _as_date(cfg["train"].get("start"))
+end_cfg   = _as_date(cfg["train"].get("end"))
+
+if not end_cfg:
+    end_cfg = datetime.now(timezone.utc).date()
+if not start_cfg:
+    start_cfg = (pd.to_datetime(end_cfg) - pd.Timedelta(days=90)).date()
+
+start = str(start_cfg)
+end   = str(end_cfg)
+
+
     # Token priority: ENV (local) -> Streamlit secrets (cloud)
     token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
     if not token:
