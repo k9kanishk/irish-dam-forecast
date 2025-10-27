@@ -4,6 +4,7 @@
 import os
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 import yaml
 import pandas as pd
 import streamlit as st
@@ -15,7 +16,7 @@ REPO_ROOT = APP_FILE.parents[2]  # .../irish-dam-forecast
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-load_dotenv()  # local dev uses .env; on Streamlit Cloud use st.secrets
+load_dotenv()  # local dev uses .env; on Streamlit Cloud we'll use st.secrets
 
 DATA_PATH = Path("data/processed/train.parquet")
 
@@ -32,28 +33,31 @@ def ensure_dataset():
     from src.features.build_features import build_feature_table
     from src.features.targets import make_day_ahead_target
 
+    # Load config
     cfg = yaml.safe_load(open("config.yaml"))
 
-    # inside ensure_dataset(), after loading cfg
-from datetime import datetime, timedelta, timezone
+    # ---- Guard against missing/blank dates in config.yaml ----
+    def _as_date(s):
+        """Parse s to date; return None if missing/blank/invalid."""
+        if s is None or (isinstance(s, str) and s.strip() == ""):
+            return None
+        try:
+            return pd.to_datetime(s).date()
+        except Exception:
+            return None
 
-def _as_date(s):  # returns None if empty/invalid
-    try:
-        return pd.to_datetime(s).date()
-    except Exception:
-        return None
+    start_cfg = _as_date(cfg.get("train", {}).get("start"))
+    end_cfg = _as_date(cfg.get("train", {}).get("end"))
 
-start_cfg = _as_date(cfg["train"].get("start"))
-end_cfg   = _as_date(cfg["train"].get("end"))
+    # If end missing -> today (UTC). If start missing -> last 90 days from end.
+    if not end_cfg:
+        end_cfg = datetime.now(timezone.utc).date()
+    if not start_cfg:
+        start_cfg = (pd.to_datetime(end_cfg) - pd.Timedelta(days=90)).date()
 
-if not end_cfg:
-    end_cfg = datetime.now(timezone.utc).date()
-if not start_cfg:
-    start_cfg = (pd.to_datetime(end_cfg) - pd.Timedelta(days=90)).date()
-
-start = str(start_cfg)
-end   = str(end_cfg)
-
+    # Use these strings for all queries
+    start = str(start_cfg)
+    end = str(end_cfg)
 
     # Token priority: ENV (local) -> Streamlit secrets (cloud)
     token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
@@ -65,13 +69,10 @@ end   = str(end_cfg)
 
     ent = Entsoe(token=token)
 
-    start = cfg["train"]["start"]
-    end = cfg["train"]["end"]
-
     # Pull data
-    dam = ent.day_ahead_prices(start, end)
-    load_fc = ent.load_forecast(start, end)
-    ws = ent.wind_solar_forecast(start, end)
+    dam = ent.day_ahead_prices(start=start, end=end)
+    load_fc = ent.load_forecast(start=start, end=end)
+    ws = ent.wind_solar_forecast(start=start, end=end)
 
     lat = cfg["weather"]["lat"]
     lon = cfg["weather"]["lon"]
@@ -94,7 +95,7 @@ df = pd.read_parquet(DATA_PATH)
 
 # --- app proper ---
 import plotly.express as px
-from datetime import datetime
+from datetime import datetime as dtmod
 from zoneinfo import ZoneInfo
 
 st.set_page_config(page_title="Irish DAM Forecast", layout="wide")
@@ -106,7 +107,7 @@ mdl.fit(df, y)
 
 st.title("Irish Day-Ahead Power Price Forecast (SEMOpx)")
 
-today_ie = datetime.now(ZoneInfo("Europe/Dublin")).date()
+today_ie = dtmod.now(ZoneInfo("Europe/Dublin")).date()
 date = st.date_input("Choose a date to forecast", today_ie)
 
 mask = (df.index.date == pd.to_datetime(date).date())
