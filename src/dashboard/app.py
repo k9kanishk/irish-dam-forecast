@@ -202,6 +202,15 @@ def ensure_dataset():
     X = build_feature_table(dam, load_fc, ws, weather)
     y = make_day_ahead_target(dam).reindex(X.index)
 
+    if X.empty:
+    st.error(
+        "No overlapping timestamps across ENTSO-E & weather feeds.\n"
+        "Try narrowing the window in config.yaml (e.g., 2025-07-01 → 2025-09-30), "
+        "or check that all feeds returned data."
+    )
+    st.stop()
+
+
     out = X.copy()
     out["target"] = y
 
