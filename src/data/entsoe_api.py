@@ -58,7 +58,7 @@ class Entsoe:
         """
         def _try(psr: str) -> pd.Series:
             try:
-                s = self.client.query_generation_forecast(
+                s = self.client.query_wind_and_solar_forecast(
                     self.area,
                     start=self._brussels(start),
                     end=self._brussels(end),
