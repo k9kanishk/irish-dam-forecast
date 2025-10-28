@@ -44,13 +44,6 @@ def _chunk_edges(start_date, end_date, days=120):
         yield str(cur.date()), str(nxt.date())
         cur = nxt + pd.Timedelta(days=1)
 
-# --- FAST MODE: clamp window to last N days so first build is quick ---
-MAX_DAYS = int(os.getenv("MAX_DAYS", "60"))  # change to 30–90 if you want
-w_days = (pd.to_datetime(end_all) - pd.to_datetime(start_all)).days + 1
-if w_days > MAX_DAYS:
-    start_all = str((pd.to_datetime(end_all) - pd.Timedelta(days=MAX_DAYS)).date())
-    st.info(f"Fast mode: clamped window to last {MAX_DAYS} days → {start_all} → {end_all}")
-
 
 @st.cache_data(show_spinner=True)
 def ensure_dataset():
@@ -224,6 +217,12 @@ def ensure_dataset():
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     out.dropna().to_parquet(DATA_PATH)
 
+# --- FAST MODE: clamp window to last N days so first build is quick ---
+MAX_DAYS = int(os.getenv("MAX_DAYS", "60"))  # change to 30–90 if you want
+w_days = (pd.to_datetime(end_all) - pd.to_datetime(start_all)).days + 1
+if w_days > MAX_DAYS:
+    start_all = str((pd.to_datetime(end_all) - pd.Timedelta(days=MAX_DAYS)).date())
+    st.info(f"Fast mode: clamped window to last {MAX_DAYS} days → {start_all} → {end_all}")
 
 # Build (cached) then load
 ensure_dataset()
