@@ -61,7 +61,8 @@ def ensure_dataset():
 
     # Load config and compute a safe window if missing
     with open("config.yaml", "r", encoding="utf-8") as _f:
-    cfg = yaml.safe_load(_f)
+        cfg = yaml.safe_load(_f)
+        
     start_cfg = _as_date(cfg.get("train", {}).get("start"))
     end_cfg = _as_date(cfg.get("train", {}).get("end"))
     if not end_cfg:
