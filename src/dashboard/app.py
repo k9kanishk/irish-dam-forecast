@@ -72,6 +72,13 @@ def ensure_dataset():
     start_all = str(start_cfg)
     end_all = str(end_cfg)
 
+# --- FAST MODE: clamp window to last N days so first build is quick ---
+MAX_DAYS = int(os.getenv("MAX_DAYS", "60"))  # tune to 30–90 as you like
+span_days = (pd.to_datetime(end_all) - pd.to_datetime(start_all)).days + 1
+if span_days > MAX_DAYS:
+    start_all = str((pd.to_datetime(end_all) - pd.Timedelta(days=MAX_DAYS)).date())
+    st.info(f"Fast mode: clamped window to last {MAX_DAYS} days → {start_all} → {end_all}")
+    
     # Token: ENV first, then Streamlit secrets
     token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
     if not token:
@@ -217,12 +224,7 @@ def ensure_dataset():
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     out.dropna().to_parquet(DATA_PATH)
 
-# --- FAST MODE: clamp window to last N days so first build is quick ---
-MAX_DAYS = int(os.getenv("MAX_DAYS", "60"))  # change to 30–90 if you want
-w_days = (pd.to_datetime(end_all) - pd.to_datetime(start_all)).days + 1
-if w_days > MAX_DAYS:
-    start_all = str((pd.to_datetime(end_all) - pd.Timedelta(days=MAX_DAYS)).date())
-    st.info(f"Fast mode: clamped window to last {MAX_DAYS} days → {start_all} → {end_all}")
+
 
 # Build (cached) then load
 ensure_dataset()
