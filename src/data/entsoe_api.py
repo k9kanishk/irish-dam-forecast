@@ -6,28 +6,24 @@ from zoneinfo import ZoneInfo
 from entsoe import EntsoePandasClient
 from entsoe.exceptions import NoMatchingDataError
 
-# entsoe-py expects timestamps in Europe/Brussels (per docs/examples)
-TZ_QUERY = ZoneInfo("Europe/Brussels")
+AREA_IE = "IE"                     # <- use IE (works across entsoe-py versions)
+TZ_QUERY = ZoneInfo("Europe/Brussels")  # entsoe-py expects Brussels tz
 
 class Entsoe:
-    """Thin wrapper around entsoe-py with sane defaults for Ireland (IE/IE(SEM))."""
-
-    def __init__(self, token: str | None = None, area: str = "IE(SEM)"):
+    def __init__(self, token: str | None = None, area: str = AREA_IE):
         token = token or os.getenv("ENTSOE_TOKEN")
         if not token:
             raise RuntimeError("ENTSOE_TOKEN not set. Put it in .env or st.secrets.")
         self.client = EntsoePandasClient(api_key=token)
-        # Prefer explicit IE(SEM). If your entsoe-py is older, 'IE' also works via mapping.
-        self.area = area  # "IE(SEM)" or "IE"
+        self.area = area
 
     def _brussels(self, dt_like) -> pd.Timestamp:
-        """Return tz-aware Timestamp in Europe/Brussels as required by entsoe-py."""
         ts = pd.Timestamp(dt_like)
         if ts.tzinfo is None:
             return ts.tz_localize(TZ_QUERY)
         return ts.tz_convert(TZ_QUERY)
 
-    # ---------- Prices ----------
+    # -------- Prices --------
     def day_ahead_prices(self, start: str, end: str) -> pd.Series:
         s = self.client.query_day_ahead_prices(
             self.area,
@@ -39,7 +35,7 @@ class Entsoe:
         s.name = "dam_eur_mwh"
         return s
 
-    # ---------- Load forecast ----------
+    # -------- Load forecast --------
     def load_forecast(self, start: str, end: str) -> pd.Series:
         s = self.client.query_load_forecast(
             self.area,
@@ -51,14 +47,14 @@ class Entsoe:
         s.name = "load_forecast_mw"
         return s
 
-    # ---------- Wind & Solar forecast (compose from generation forecast by PSR) ----------
+    # -------- Wind & Solar forecast (compose from PSR types) --------
     def wind_solar_forecast(self, start: str, end: str) -> pd.DataFrame:
         """
-        Returns a DataFrame with columns:
-        - solar_mw
-        - wind_onshore_mw
-        - wind_offshore_mw
-        - wind_total_mw
+        Columns:
+          - solar_mw
+          - wind_onshore_mw
+          - wind_offshore_mw
+          - wind_total_mw
         """
         def _try(psr: str) -> pd.Series:
             try:
@@ -66,7 +62,7 @@ class Entsoe:
                     self.area,
                     start=self._brussels(start),
                     end=self._brussels(end),
-                    psr_type=psr,   # B16=Solar, B19=Wind Onshore, B18=Wind Offshore
+                    psr_type=psr,    # B16=Solar, B19=Wind Onshore, B18=Wind Offshore
                 )
                 return s if s is not None else pd.Series(dtype=float)
             except NoMatchingDataError:
@@ -77,11 +73,7 @@ class Entsoe:
         wind_off = _try("B18")
 
         df = pd.concat(
-            {
-                "solar_mw": solar,
-                "wind_onshore_mw": wind_on,
-                "wind_offshore_mw": wind_off,
-            },
+            {"solar_mw": solar, "wind_onshore_mw": wind_on, "wind_offshore_mw": wind_off},
             axis=1,
         ).sort_index()
 
