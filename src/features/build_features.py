@@ -25,24 +25,75 @@ def wind_power_proxy(wind_ms: pd.Series) -> pd.Series:
     return proxy.rename('wind_proxy')
 
 
-def build_feature_table(dam: pd.Series,
-                        load_fc: pd.Series,
-                        windsol_fc: pd.DataFrame,
-                        weather: pd.DataFrame) -> pd.DataFrame:
+import pandas as pd
+from .utils import wind_power_proxy  # already used in your file
 
-    dam.index = dam.index.tz_localize(None)
-    load_fc.index = load_fc.index.tz_localize(None)
-    windsol_fc.index = windsol_fc.index.tz_localize(None)
-    weather.index = weather.index.tz_localize(None)                        
-    df = pd.concat([dam, load_fc, windsol_fc, weather], axis=1).sort_index()
-    df['wind_proxy'] = wind_power_proxy(df['wind100m_ms'])
-    # lags & rolling stats
-    for col in ['dam_eur_mwh','load_forecast_mw','wind_proxy']:
-        for L in [1,24,48,72]:
-            df[f'{col}_lag{L}'] = df[col].shift(L)
-        df[f'{col}_roll24_mean'] = df[col].rolling(24).mean()
-        df[f'{col}_roll24_std']  = df[col].rolling(24).std()
-    # calendar
-    cal = calendar_features(df.index)
-    df = df.join(cal)
-    return df.dropna()
+def build_feature_table(
+    dam: pd.Series,
+    load_fc: pd.Series,
+    windsol_fc: pd.DataFrame,
+    weather: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Align all inputs on the **intersection** of timestamps (hourly),
+    then build lags/rolls and calendar features.
+    Always returns a DataFrame (may be empty if no overlap).
+    """
+
+    # Ensure expected names
+    dam = dam.copy(); dam.name = "dam_eur_mwh"
+    load_fc = load_fc.copy(); load_fc.name = "load_forecast_mw"
+    windsol_fc = windsol_fc.copy()
+    weather = weather.copy()
+
+    # Pick useful wind/solar cols if present
+    keep_ws = [c for c in ["wind_total_mw", "wind_onshore_mw", "wind_offshore_mw", "solar_mw"]
+               if c in getattr(windsol_fc, "columns", [])]
+    if keep_ws:
+        windsol_fc = windsol_fc[keep_ws]
+    else:
+        # empty frame with correct index will be set after reindex
+        windsol_fc = pd.DataFrame(index=dam.index)
+
+    # ---- Align to common hourly index (intersection) ----
+    idx = dam.index
+    idx = idx.intersection(load_fc.index)
+    if not windsol_fc.empty:
+        idx = idx.intersection(windsol_fc.index)
+    if not weather.empty:
+        idx = idx.intersection(weather.index)
+    idx = idx.sort_values()
+
+    if len(idx) == 0:
+        return pd.DataFrame()  # caller will handle
+
+    dam = dam.reindex(idx)
+    load_fc = load_fc.reindex(idx)
+    windsol_fc = windsol_fc.reindex(idx)
+    weather = weather.reindex(idx)
+
+    # Concatenate AFTER alignment (no NaNs solely due to mismatched stamps)
+    df = pd.concat([dam, load_fc, windsol_fc, weather], axis=1)
+
+    # Wind proxy from weather if present; otherwise fallback to wind power cols
+    if "wind100m_ms" in df.columns:
+        df["wind_proxy"] = wind_power_proxy(df["wind100m_ms"])
+    elif keep_ws:
+        df["wind_proxy"] = windsol_fc[keep_ws].sum(axis=1)
+    else:
+        df["wind_proxy"] = pd.NA
+
+    # Lags & rolling stats (tolerate partial windows)
+    for col in ["dam_eur_mwh", "load_forecast_mw", "wind_proxy"]:
+        if col in df.columns:
+            for L in [1, 24, 48, 72]:
+                df[f"{col}_lag{L}"] = df[col].shift(L)
+            df[f"{col}_roll24_mean"] = df[col].rolling(24, min_periods=12).mean()
+            df[f"{col}_roll24_std"]  = df[col].rolling(24, min_periods=12).std()
+
+    # Calendar features
+    df["hour"] = idx.hour
+    df["dow"] = idx.dayofweek
+    df["month"] = idx.month
+
+    return df
