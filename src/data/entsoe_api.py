@@ -35,21 +35,21 @@ class Entsoe:
         s.name = "dam_eur_mwh"
         return s
 
-    # -------- Load forecast --------
-        # --- Load forecast -> always return a Series named 'load_forecast_mw' ---
+    # --- Load forecast -> always return a Series named 'load_forecast_mw' ---
     def load_forecast(self, start: str, end: str) -> pd.Series:
         res = self.client.query_load_forecast(
             self.area,
             start=self._brussels(start),
             end=self._brussels(end),
         )
-        # Handle empty
+
+        # Empty?
         if res is None or (hasattr(res, "empty") and res.empty) or (isinstance(res, pd.Series) and len(res) == 0):
             raise NoMatchingDataError("No load forecast returned.")
 
         # Normalize to a single Series
         if isinstance(res, pd.DataFrame):
-            # Flatten possible MultiIndex and pick the most relevant column
+            # flatten possible MultiIndex, pick a sensible column
             def _norm(c):
                 return " ".join(map(str, c)).lower() if isinstance(c, tuple) else str(c).lower()
 
@@ -63,14 +63,15 @@ class Entsoe:
                 if pick is not None:
                     break
             if pick is None:
-                pick = res.columns[0]  # fallback: first column
+                pick = res.columns[0]  # fallback
             s = res[pick]
         else:
-            s = res  # already a Series
+            s = res
 
-        s = s.astype("float64")  # be safe for concat/rolling
+        s = pd.to_numeric(s, errors="coerce").astype("float64")
         s.name = "load_forecast_mw"
         return s
+
 
 
     # -------- Wind & Solar forecast (compose from PSR types) --------
