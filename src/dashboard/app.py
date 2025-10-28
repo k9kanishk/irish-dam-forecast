@@ -212,11 +212,26 @@ def ensure_dataset():
 # Build (cached) then load
 ensure_dataset()
 df = pd.read_parquet(DATA_PATH)
-
 # --- app proper ---
 import plotly.express as px
 from datetime import datetime as dtmod
 from zoneinfo import ZoneInfo
+
+# Show coverage and limit the widget to available dates
+date_index = pd.Index(df.index.date)
+day_min, day_max = date_index.min(), date_index.max()
+st.caption(f"Data coverage: {day_min} → {day_max}  |  rows: {len(df):,}")
+
+# Default to the latest available day and bound the picker
+default_day = day_max
+date = st.date_input(
+    "Choose a date to forecast",
+    value=default_day,
+    min_value=day_min,
+    max_value=day_max,
+)
+mask = (df.index.date == pd.to_datetime(date).date())
+
 
 st.set_page_config(page_title="Irish DAM Forecast", layout="wide")
 
