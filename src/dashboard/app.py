@@ -214,23 +214,40 @@ ensure_dataset()
 df = pd.read_parquet(DATA_PATH)
 # --- app proper ---
 import plotly.express as px
-from datetime import datetime as dtmod
+from datetime import date as _date
 from zoneinfo import ZoneInfo
 
-# Show coverage and limit the widget to available dates
-date_index = pd.Index(df.index.date)
-day_min, day_max = date_index.min(), date_index.max()
-st.caption(f"Data coverage: {day_min} → {day_max}  |  rows: {len(df):,}")
+# compute coverage from the DataFrame index
+idx = pd.DatetimeIndex(df.index)                 # ensure DatetimeIndex
+days = pd.Index(idx.date)                        # array of python date objects
 
-# Default to the latest available day and bound the picker
-default_day = day_max
+if len(days) == 0:
+    st.error("No rows found in the dataset.")
+    st.stop()
+
+# force python datetime.date for all three args
+def _as_date(d): 
+    return d if isinstance(d, _date) else pd.to_datetime(d).date()
+
+day_min = _as_date(days.min())
+day_max = _as_date(days.max())
+
+# choose a sane default within [min,max]
+today_ie = datetime.now(ZoneInfo("Europe/Dublin")).date()
+default_day = max(day_min, min(day_max, today_ie))
+
+st.caption(f"Data coverage: {day_min} → {day_max} | rows: {len(df):,}")
+
 date = st.date_input(
     "Choose a date to forecast",
     value=default_day,
     min_value=day_min,
     max_value=day_max,
+    # format="YYYY-MM-DD",  # optional
 )
+
 mask = (df.index.date == pd.to_datetime(date).date())
+
 
 
 st.set_page_config(page_title="Irish DAM Forecast", layout="wide")
