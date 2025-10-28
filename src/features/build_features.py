@@ -29,6 +29,11 @@ def build_feature_table(dam: pd.Series,
                         load_fc: pd.Series,
                         windsol_fc: pd.DataFrame,
                         weather: pd.DataFrame) -> pd.DataFrame:
+
+    dam.index = dam.index.tz_localize(None)
+    load_fc.index = load_fc.index.tz_localize(None)
+    windsol_fc.index = windsol_fc.index.tz_localize(None)
+    weather.index = weather.index.tz_localize(None)                        
     df = pd.concat([dam, load_fc, windsol_fc, weather], axis=1).sort_index()
     df['wind_proxy'] = wind_power_proxy(df['wind100m_ms'])
     # lags & rolling stats
