@@ -1,25 +1,49 @@
+# src/data/weather.py
 from __future__ import annotations
-import requests
 import pandas as pd
-
-BASE = 'https://api.open-meteo.com/v1/forecast'
-
+import requests
 
 def fetch_hourly(lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
+    """
+    Return hourly weather for [start, end] (inclusive) with columns:
+      - wind100m_ms
+      - temp2m_c
+      - cloudcover
+    Uses forecast API for <=16 days, ERA5 archive otherwise.
+    """
+    start_d = pd.to_datetime(start).date()
+    end_d   = pd.to_datetime(end).date()
+    days = (end_d - start_d).days + 1
+
+    # Choose endpoint based on window length
+    if days <= 16:
+        base = "https://api.open-meteo.com/v1/forecast"
+    else:
+        base = "https://archive-api.open-meteo.com/v1/era5"
+
     params = {
-        'latitude': lat,
-        'longitude': lon,
-        'hourly': ','.join(['wind_speed_100m','temperature_2m','cloud_cover']),
-        'start_date': start,
-        'end_date': end,
-        'timezone': 'Europe/Dublin'
+        "latitude": lat,
+        "longitude": lon,
+        # Correct variable names for Open-Meteo v1
+        "hourly": ["windspeed_100m", "temperature_2m", "cloudcover"],
+        "start_date": str(start_d),
+        "end_date": str(end_d),
+        "timezone": "Europe/Dublin",
     }
-    r = requests.get(BASE, params=params, timeout=60)
+
+    r = requests.get(base, params=params, timeout=60)
     r.raise_for_status()
-    js = r.json()['hourly']
-    dt = pd.to_datetime(js['time'])
-    df = pd.DataFrame({'wind100m_ms': js['wind_speed_100m'],
-                       't2m_c': js['temperature_2m'],
-                       'cloud_pct': js['cloud_cover']}, index=dt)
-    df.index.name = 'ts'
+    js = r.json()["hourly"]
+
+    # Build DataFrame
+    dt = pd.to_datetime(js["time"])
+    df = pd.DataFrame(
+        {
+            "wind100m_ms": js.get("windspeed_100m"),
+            "temp2m_c": js["temperature_2m"],
+            "cloudcover": js["cloudcover"],
+        },
+        index=dt,
+    )
+
     return df
