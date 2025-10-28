@@ -60,7 +60,8 @@ def ensure_dataset():
     from entsoe.exceptions import NoMatchingDataError
 
     # Load config and compute a safe window if missing
-    cfg = yaml.safe_load(open("config.yaml"))
+    with open("config.yaml", "r", encoding="utf-8") as _f:
+    cfg = yaml.safe_load(_f)
     start_cfg = _as_date(cfg.get("train", {}).get("start"))
     end_cfg = _as_date(cfg.get("train", {}).get("end"))
     if not end_cfg:
