@@ -170,11 +170,11 @@ def _to_local_naive(obj, assume_utc=False):
     out.index = idx
     return out
 
-# Normalize inputs
-dam     = _to_local_naive(dam, assume_utc=False)
-load_fc = _to_local_naive(load_fc, assume_utc=False)
-ws      = _to_local_naive(ws, assume_utc=False)
-weather = _to_local_naive(weather, assume_utc=True)
+   # Normalize inputs
+   dam     = _to_local_naive(dam, assume_utc=False)
+   load_fc = _to_local_naive(load_fc, assume_utc=False)
+   ws      = _to_local_naive(ws, assume_utc=False)
+   weather = _to_local_naive(weather, assume_utc=True)
 
 # --- NEW: coerce load_fc to a Series named 'load_forecast_mw' ---
 def _coerce_load_series(x) -> pd.Series:
