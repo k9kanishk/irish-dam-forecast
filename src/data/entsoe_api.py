@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from entsoe import EntsoePandasClient
 from entsoe.exceptions import NoMatchingDataError
 
-AREA_IE = "IE"                     # <- use IE (works across entsoe-py versions)
+AREA_IE = "IE_SEM"                     # <- use IE (works across entsoe-py versions)
 TZ_QUERY = ZoneInfo("Europe/Brussels")  # entsoe-py expects Brussels tz
 
 class Entsoe:
