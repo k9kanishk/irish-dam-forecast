@@ -157,6 +157,50 @@ def ensure_dataset():
     lon = cfg["weather"]["lon"]
     weather = fetch_hourly(lat, lon, start_all, end_all)
 
+# --- timezone harmonization helper (as you already added) ---
+def _to_local_naive(obj, assume_utc=False):
+    if not hasattr(obj, "index") or not isinstance(obj.index, pd.DatetimeIndex):
+        return obj
+    out = obj.copy()
+    idx = out.index
+    if idx.tz is None:
+        base_tz = "UTC" if assume_utc else "Europe/Brussels"
+        idx = idx.tz_localize(base_tz)
+    idx = idx.tz_convert("Europe/Dublin").tz_localize(None)
+    out.index = idx
+    return out
+
+# Normalize inputs
+dam     = _to_local_naive(dam, assume_utc=False)
+load_fc = _to_local_naive(load_fc, assume_utc=False)
+ws      = _to_local_naive(ws, assume_utc=False)
+weather = _to_local_naive(weather, assume_utc=True)
+
+# --- NEW: coerce load_fc to a Series named 'load_forecast_mw' ---
+def _coerce_load_series(x) -> pd.Series:
+    if isinstance(x, pd.Series):
+        s = x.copy()
+    else:
+        df_ = x.copy()
+        def _norm(c): return " ".join(map(str, c)).lower() if isinstance(c, tuple) else str(c).lower()
+        colmap = {_norm(c): c for c in df_.columns}
+        pick = None
+        for key in ("load forecast", "forecast", "load"):
+            for k, c in colmap.items():
+                if key in k:
+                    pick = c; break
+            if pick is not None:
+                break
+        if pick is None:
+            pick = df_.columns[0]
+        s = df_[pick]
+    s = pd.to_numeric(s, errors="coerce").astype("float64")
+    s.name = "load_forecast_mw"
+    return s
+
+load_fc = _coerce_load_series(load_fc)
+
+    
     # Features + target
     X = build_feature_table(dam, load_fc, ws, weather)
     y = make_day_ahead_target(dam).reindex(X.index)
