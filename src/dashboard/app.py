@@ -201,15 +201,15 @@ def _coerce_load_series(x) -> pd.Series:
 load_fc = _coerce_load_series(load_fc)
 
     
-    # Features + target
-    X = build_feature_table(dam, load_fc, ws, weather)
-    y = make_day_ahead_target(dam).reindex(X.index)
+# Features + target
+X = build_feature_table(dam, load_fc, ws, weather)
+y = make_day_ahead_target(dam).reindex(X.index)
 
-    out = X.copy()
-    out["target"] = y
+out = X.copy()
+out["target"] = y
 
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    out.dropna().to_parquet(DATA_PATH)
+DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+out.dropna().to_parquet(DATA_PATH)
 
 
 # Build (cached) then load
