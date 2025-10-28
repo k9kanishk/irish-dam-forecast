@@ -56,13 +56,13 @@ def ensure_dataset():
     from src.data.weather import fetch_hourly
     from src.features.build_features import build_feature_table
     from src.features.targets import make_day_ahead_target
-    # import here to avoid hard dependency if entsoe-py changes
     from entsoe.exceptions import NoMatchingDataError
 
-    # Load config and compute a safe window if missing
-    with open("config.yaml", "r", encoding="utf-8") as _f:
-        cfg = yaml.safe_load(_f)
-        
+    # Load config (close the file properly)
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    # Compute window (defaults if missing)
     start_cfg = _as_date(cfg.get("train", {}).get("start"))
     end_cfg = _as_date(cfg.get("train", {}).get("end"))
     if not end_cfg:
@@ -81,7 +81,7 @@ def ensure_dataset():
     ent = Entsoe(token=token)
 
     # ---- Chunked pulls to avoid 400 and tolerate empty chunks ----
-    def _pull_series(method_name):
+    def _pull_series(method_name: str) -> pd.Series:
         parts = []
         empty_spans = []
         for s, e in _chunk_edges(start_all, end_all, days=120):
@@ -97,20 +97,21 @@ def ensure_dataset():
                     empty_spans.append((s, e))
                     break
                 except Exception:
-                    # simple backoff on 400/429/5xx
                     time.sleep(1.5 * (attempt + 1))
                     if attempt == 2:
                         raise
         if empty_spans and not parts:
-            st.warning(f"ENTSO-E returned no data for {method_name} in window {start_all} → {end_all}. "
-                       f"Try narrowing the window in config.yaml (e.g., last 90–180 days).")
+            st.warning(
+                f"ENTSO-E returned no data for {method_name} in window {start_all} → {end_all}. "
+                f"Try narrowing the window in config.yaml (e.g., last 90–180 days)."
+            )
         if not parts:
             return pd.Series(dtype=float)
         srs = pd.concat(parts).sort_index()
         srs = srs[~srs.index.duplicated(keep="last")]
         return srs
 
-    def _pull_frame(method_name):
+    def _pull_frame(method_name: str) -> pd.DataFrame:
         parts = []
         empty_spans = []
         for s, e in _chunk_edges(start_all, end_all, days=120):
@@ -144,12 +145,16 @@ def ensure_dataset():
 
     # Hard guards: we need at least prices and load forecast to proceed
     if dam.empty:
-        st.error("No day-ahead prices returned for the selected window. "
-                 "Set a recent window in config.yaml (e.g., last 90–180 days) and rerun.")
+        st.error(
+            "No day-ahead prices returned for the selected window. "
+            "Set a recent window in config.yaml (e.g., last 90–180 days) and rerun."
+        )
         st.stop()
     if load_fc.empty:
-        st.error("No load forecast returned for the selected window. "
-                 "Try a recent window in config.yaml and rerun.")
+        st.error(
+            "No load forecast returned for the selected window. "
+            "Try a recent window in config.yaml and rerun."
+        )
         st.stop()
 
     # Weather in one go (Open-Meteo tolerates larger ranges)
@@ -157,59 +162,51 @@ def ensure_dataset():
     lon = cfg["weather"]["lon"]
     weather = fetch_hourly(lat, lon, start_all, end_all)
 
-# --- timezone harmonization helper (as you already added) ---
-def _to_local_naive(obj, assume_utc=False):
-    if not hasattr(obj, "index") or not isinstance(obj.index, pd.DatetimeIndex):
-        return obj
-    out = obj.copy()
-    idx = out.index
-    if idx.tz is None:
-        base_tz = "UTC" if assume_utc else "Europe/Brussels"
-        idx = idx.tz_localize(base_tz)
-    idx = idx.tz_convert("Europe/Dublin").tz_localize(None)
-    out.index = idx
-    return out
+    # ---- Timezone harmonization (make all indices Europe/Dublin tz-naive) ----
+    def _to_local_naive(obj, assume_utc: bool = False):
+        if not hasattr(obj, "index") or not isinstance(obj.index, pd.DatetimeIndex):
+            return obj
+        out = obj.copy()
+        idx = out.index
+        if idx.tz is None:
+            base_tz = "UTC" if assume_utc else "Europe/Brussels"
+            idx = idx.tz_localize(base_tz)
+        idx = idx.tz_convert("Europe/Dublin").tz_localize(None)
+        out.index = idx
+        return out
 
-   # Normalize inputs
-   dam     = _to_local_naive(dam, assume_utc=False)
-   load_fc = _to_local_naive(load_fc, assume_utc=False)
-   ws      = _to_local_naive(ws, assume_utc=False)
-   weather = _to_local_naive(weather, assume_utc=True)
+    dam = _to_local_naive(dam, assume_utc=False)
+    load_fc = _to_local_naive(load_fc, assume_utc=False)
+    ws = _to_local_naive(ws, assume_utc=False)
+    weather = _to_local_naive(weather, assume_utc=True)
 
-# --- NEW: coerce load_fc to a Series named 'load_forecast_mw' ---
-def _coerce_load_series(x) -> pd.Series:
-    if isinstance(x, pd.Series):
-        s = x.copy()
-    else:
-        df_ = x.copy()
+    # ---- Ensure load_fc is a Series named 'load_forecast_mw' ----
+    if isinstance(load_fc, pd.DataFrame):
         def _norm(c): return " ".join(map(str, c)).lower() if isinstance(c, tuple) else str(c).lower()
-        colmap = {_norm(c): c for c in df_.columns}
+        colmap = {_norm(c): c for c in load_fc.columns}
         pick = None
         for key in ("load forecast", "forecast", "load"):
             for k, c in colmap.items():
                 if key in k:
-                    pick = c; break
+                    pick = c
+                    break
             if pick is not None:
                 break
         if pick is None:
-            pick = df_.columns[0]
-        s = df_[pick]
-    s = pd.to_numeric(s, errors="coerce").astype("float64")
-    s.name = "load_forecast_mw"
-    return s
+            pick = load_fc.columns[0]
+        load_fc = load_fc[pick]
+    load_fc = pd.to_numeric(load_fc, errors="coerce").astype("float64")
+    load_fc.name = "load_forecast_mw"
 
-load_fc = _coerce_load_series(load_fc)
+    # ---- Build features + target ----
+    X = build_feature_table(dam, load_fc, ws, weather)
+    y = make_day_ahead_target(dam).reindex(X.index)
 
-    
-# Features + target
-X = build_feature_table(dam, load_fc, ws, weather)
-y = make_day_ahead_target(dam).reindex(X.index)
+    out = X.copy()
+    out["target"] = y
 
-out = X.copy()
-out["target"] = y
-
-DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-out.dropna().to_parquet(DATA_PATH)
+    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    out.dropna().to_parquet(DATA_PATH)
 
 
 # Build (cached) then load
