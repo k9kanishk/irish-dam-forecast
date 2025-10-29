@@ -14,7 +14,7 @@ class Entsoe:
         token = token or os.getenv("ENTSOE_TOKEN")
         if not token:
             raise RuntimeError("ENTSOE_TOKEN not set. Put it in .env or st.secrets.")
-        self.client = EntsoePandasClient(api_key=token)
+        self.client = EntsoePandasClient(api_key=token, timeout=30, retry_count=1)
         self.area = area
 
     def _brussels(self, dt_like) -> pd.Timestamp:
