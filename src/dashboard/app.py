@@ -88,9 +88,9 @@ def ensure_dataset():
     # ---- Chunked pulls to avoid 400 and tolerate empty chunks ----
     def _pull_series(method_name: str) -> pd.Series:
         parts, empty_spans = [], []
-    for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
-        st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
-        for attempt in range(3):
+        for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
+            st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
+            for attempt in range(3):
             try:
                 srs = getattr(ent, method_name)(start=s, end=e)
                 if srs is not None and len(srs) > 0:
@@ -101,16 +101,14 @@ def ensure_dataset():
             except Exception:
                 time.sleep(1.5 * (attempt + 1))
                 if attempt == 2: raise
-    if not parts:
-        return pd.Series(dtype=float)
-    srs = pd.concat(parts).sort_index()
-    return srs[~srs.index.duplicated(keep="last")]
-        
-    
+        if not parts:
+            return pd.Series(dtype=float)
+        srs = pd.concat(parts).sort_index()
+        return srs[~srs.index.duplicated(keep="last")]            
 
     def _pull_frame(method_name: str) -> pd.DataFrame:
         parts, empty_spans = [], []
-    for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
+        for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
         st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
         for attempt in range(3):
             try:
@@ -123,10 +121,10 @@ def ensure_dataset():
             except Exception:
                 time.sleep(1.5 * (attempt + 1))
                 if attempt == 2: raise
-    if not parts:
-        return pd.DataFrame()
-    df = pd.concat(parts).sort_index()
-    return df[~df.index.duplicated(keep="last")]
+        if not parts:
+            return pd.DataFrame()
+        df = pd.concat(parts).sort_index()
+        return df[~df.index.duplicated(keep="last")]            
 
     
     st.caption(f"Fetching ENTSO-E (chunked): {start_all} → {end_all}")
