@@ -32,13 +32,11 @@ def _as_date(s):
         return None
 
 
-def _chunk_edges(start_date, end_date, days=120):
-    """Yield [start,end] chunks inclusive with <= days span (ENTSO-E safe)."""
+def _chunk_edges(start_date, end_date, days=30):  # 30 keeps calls small/fast
     s = pd.to_datetime(start_date).date()
     e = pd.to_datetime(end_date).date()
     step = pd.Timedelta(days=days)
-    cur = pd.to_datetime(s)
-    last = pd.to_datetime(e)
+    cur = pd.to_datetime(s); last = pd.to_datetime(e)
     while cur <= last:
         nxt = min(cur + step, last)
         yield str(cur.date()), str(nxt.date())
@@ -89,61 +87,44 @@ def ensure_dataset():
 
     # ---- Chunked pulls to avoid 400 and tolerate empty chunks ----
     def _pull_series(method_name: str) -> pd.Series:
-        parts = []
-        empty_spans = []
-        for s, e in _chunk_edges(start_all, end_all, days=120):
-            for attempt in range(3):
-                try:
-                    srs = getattr(ent, method_name)(start=s, end=e)
-                    if srs is not None and len(srs) > 0:
-                        parts.append(srs)
-                    else:
-                        empty_spans.append((s, e))
-                    break
-                except NoMatchingDataError:
-                    empty_spans.append((s, e))
-                    break
-                except Exception:
-                    time.sleep(1.5 * (attempt + 1))
-                    if attempt == 2:
-                        raise
-        if empty_spans and not parts:
-            st.warning(
-                f"ENTSO-E returned no data for {method_name} in window {start_all} → {end_all}. "
-                f"Try narrowing the window in config.yaml (e.g., last 90–180 days)."
-            )
-        if not parts:
-            return pd.Series(dtype=float)
-        srs = pd.concat(parts).sort_index()
-        srs = srs[~srs.index.duplicated(keep="last")]
-        return srs
+    parts, empty_spans = [], []
+    for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
+        st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
+        for attempt in range(3):
+            try:
+                srs = getattr(ent, method_name)(start=s, end=e)
+                if srs is not None and len(srs) > 0:
+                    parts.append(srs); break
+                empty_spans.append((s, e)); break
+            except NoMatchingDataError:
+                empty_spans.append((s, e)); break
+            except Exception:
+                time.sleep(1.5 * (attempt + 1))
+                if attempt == 2: raise
+    if not parts:
+        return pd.Series(dtype=float)
+    srs = pd.concat(parts).sort_index()
+    return srs[~srs.index.duplicated(keep="last")]
 
     def _pull_frame(method_name: str) -> pd.DataFrame:
-        parts = []
-        empty_spans = []
-        for s, e in _chunk_edges(start_all, end_all, days=120):
-            for attempt in range(3):
-                try:
-                    dfp = getattr(ent, method_name)(start=s, end=e)
-                    if dfp is not None and not dfp.empty:
-                        parts.append(dfp)
-                    else:
-                        empty_spans.append((s, e))
-                    break
-                except NoMatchingDataError:
-                    empty_spans.append((s, e))
-                    break
-                except Exception:
-                    time.sleep(1.5 * (attempt + 1))
-                    if attempt == 2:
-                        raise
-        if empty_spans and not parts:
-            st.warning(f"ENTSO-E returned no data for {method_name} in window {start_all} → {end_all}.")
-        if not parts:
-            return pd.DataFrame()
-        df = pd.concat(parts).sort_index()
-        df = df[~df.index.duplicated(keep="last")]
-        return df
+    parts, empty_spans = [], []
+    for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
+        st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
+        for attempt in range(3):
+            try:
+                dfp = getattr(ent, method_name)(start=s, end=e)
+                if dfp is not None and not dfp.empty:
+                    parts.append(dfp); break
+                empty_spans.append((s, e)); break
+            except NoMatchingDataError:
+                empty_spans.append((s, e)); break
+            except Exception:
+                time.sleep(1.5 * (attempt + 1))
+                if attempt == 2: raise
+    if not parts:
+        return pd.DataFrame()
+    df = pd.concat(parts).sort_index()
+    return df[~df.index.duplicated(keep="last")]
 
     st.caption(f"Fetching ENTSO-E (chunked): {start_all} → {end_all}")
     dam = _pull_series("day_ahead_prices")
