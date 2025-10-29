@@ -91,14 +91,14 @@ def ensure_dataset():
         for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
             st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
             for attempt in range(3):
-            try:
+                try:
                 srs = getattr(ent, method_name)(start=s, end=e)
                 if srs is not None and len(srs) > 0:
                     parts.append(srs); break
                 empty_spans.append((s, e)); break
-            except NoMatchingDataError:
+                except NoMatchingDataError:
                 empty_spans.append((s, e)); break
-            except Exception:
+                except Exception:
                 time.sleep(1.5 * (attempt + 1))
                 if attempt == 2: raise
         if not parts:
