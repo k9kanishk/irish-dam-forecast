@@ -56,27 +56,27 @@ def ensure_dataset():
     from src.features.targets import make_day_ahead_target
     from entsoe.exceptions import NoMatchingDataError
 
-    # Load config (close the file properly)
+    # Load config
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     # Compute window (defaults if missing)
     start_cfg = _as_date(cfg.get("train", {}).get("start"))
-    end_cfg = _as_date(cfg.get("train", {}).get("end"))
+    end_cfg   = _as_date(cfg.get("train", {}).get("end"))
     if not end_cfg:
         end_cfg = datetime.now(timezone.utc).date()
     if not start_cfg:
         start_cfg = (pd.to_datetime(end_cfg) - pd.Timedelta(days=90)).date()
     start_all = str(start_cfg)
-    end_all = str(end_cfg)
-    
+    end_all   = str(end_cfg)
+
     # --- FAST MODE: clamp window to last N days so first build is quick ---
-    MAX_DAYS = int(os.getenv("MAX_DAYS", "60"))  # tune to 30–90 as you like
+    MAX_DAYS = int(os.getenv("MAX_DAYS", "60"))  # tune 30–90 as you like
     span_days = (pd.to_datetime(end_all) - pd.to_datetime(start_all)).days + 1
     if span_days > MAX_DAYS:
         start_all = str((pd.to_datetime(end_all) - pd.Timedelta(days=MAX_DAYS)).date())
         st.info(f"Fast mode: clamped window to last {MAX_DAYS} days → {start_all} → {end_all}")
-    
+
     # Token: ENV first, then Streamlit secrets
     token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
     if not token:
@@ -85,70 +85,74 @@ def ensure_dataset():
 
     ent = Entsoe(token=token)
 
-    # ---- Chunked pulls to avoid 400 and tolerate empty chunks ----
+    # ---- Chunked pulls to avoid 400s and tolerate empty chunks ----
     def _pull_series(method_name: str) -> pd.Series:
         parts, empty_spans = [], []
         for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
+            # Optional: comment out next line if you don’t want logs on the page
             st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
             for attempt in range(3):
                 try:
-                srs = getattr(ent, method_name)(start=s, end=e)
-                if srs is not None and len(srs) > 0:
-                    parts.append(srs); break
-                empty_spans.append((s, e)); break
+                    srs = getattr(ent, method_name)(start=s, end=e)
+                    if srs is not None and len(srs) > 0:
+                        parts.append(srs)
+                    else:
+                        empty_spans.append((s, e))
+                    break
                 except NoMatchingDataError:
-                empty_spans.append((s, e)); break
+                    empty_spans.append((s, e))
+                    break
                 except Exception:
-                time.sleep(1.5 * (attempt + 1))
-                if attempt == 2: raise
+                    time.sleep(1.5 * (attempt + 1))
+                    if attempt == 2:
+                        raise
         if not parts:
             return pd.Series(dtype=float)
         srs = pd.concat(parts).sort_index()
-        return srs[~srs.index.duplicated(keep="last")]            
+        srs = srs[~srs.index.duplicated(keep="last")]
+        return srs
 
     def _pull_frame(method_name: str) -> pd.DataFrame:
         parts, empty_spans = [], []
         for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
-        st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
-        for attempt in range(3):
-            try:
-                dfp = getattr(ent, method_name)(start=s, end=e)
-                if dfp is not None and not dfp.empty:
-                    parts.append(dfp); break
-                empty_spans.append((s, e)); break
-            except NoMatchingDataError:
-                empty_spans.append((s, e)); break
-            except Exception:
-                time.sleep(1.5 * (attempt + 1))
-                if attempt == 2: raise
+            # Optional: comment out next line if you don’t want logs on the page
+            st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
+            for attempt in range(3):
+                try:
+                    dfp = getattr(ent, method_name)(start=s, end=e)
+                    if dfp is not None and not dfp.empty:
+                        parts.append(dfp)
+                    else:
+                        empty_spans.append((s, e))
+                    break
+                except NoMatchingDataError:
+                    empty_spans.append((s, e))
+                    break
+                except Exception:
+                    time.sleep(1.5 * (attempt + 1))
+                    if attempt == 2:
+                        raise
         if not parts:
             return pd.DataFrame()
         df = pd.concat(parts).sort_index()
-        return df[~df.index.duplicated(keep="last")]            
+        df = df[~df.index.duplicated(keep="last")]
+        return df
 
-    
     st.caption(f"Fetching ENTSO-E (chunked): {start_all} → {end_all}")
-    dam = _pull_series("day_ahead_prices")
+    dam     = _pull_series("day_ahead_prices")
     load_fc = _pull_series("load_forecast")
-    ws = _pull_frame("wind_solar_forecast")
+    ws      = _pull_frame("wind_solar_forecast")
 
-    # Hard guards: we need at least prices and load forecast to proceed
+    # Hard guards
     if dam.empty:
-        st.error(
-            "No day-ahead prices returned for the selected window. "
-            "Set a recent window in config.yaml (e.g., last 90–180 days) and rerun."
-        )
+        st.error("No day-ahead prices returned. Set a recent window in config.yaml (e.g., last 90–180 days) and rerun.")
         st.stop()
     if load_fc.empty:
-        st.error(
-            "No load forecast returned for the selected window. "
-            "Try a recent window in config.yaml and rerun."
-        )
+        st.error("No load forecast returned. Try a recent window in config.yaml and rerun.")
         st.stop()
 
-    # Weather in one go (Open-Meteo tolerates larger ranges)
-    lat = cfg["weather"]["lat"]
-    lon = cfg["weather"]["lon"]
+    # Weather
+    lat = cfg["weather"]["lat"]; lon = cfg["weather"]["lon"]
     weather = fetch_hourly(lat, lon, start_all, end_all)
 
     # ---- Timezone harmonization (make all indices Europe/Dublin tz-naive) ----
@@ -164,9 +168,9 @@ def ensure_dataset():
         out.index = idx
         return out
 
-    dam = _to_local_naive(dam, assume_utc=False)
+    dam     = _to_local_naive(dam, assume_utc=False)
     load_fc = _to_local_naive(load_fc, assume_utc=False)
-    ws = _to_local_naive(ws, assume_utc=False)
+    ws      = _to_local_naive(ws, assume_utc=False)
     weather = _to_local_naive(weather, assume_utc=True)
 
     # ---- Ensure load_fc is a Series named 'load_forecast_mw' ----
@@ -177,8 +181,7 @@ def ensure_dataset():
         for key in ("load forecast", "forecast", "load"):
             for k, c in colmap.items():
                 if key in k:
-                    pick = c
-                    break
+                    pick = c; break
             if pick is not None:
                 break
         if pick is None:
@@ -193,45 +196,39 @@ def ensure_dataset():
 
     if X.empty:
         st.error(
-        "No overlapping timestamps across ENTSO-E & weather feeds.\n"
-        "Try narrowing the window in config.yaml (e.g., 2025-07-01 → 2025-09-30), "
-        "or check that all feeds returned data."
-    )
-    st.stop()
-
+            "No overlapping timestamps across ENTSO-E & weather feeds.\n"
+            "Try narrowing the window in config.yaml (e.g., 2025-07-01 → 2025-09-30), "
+            "or verify the feeds returned data."
+        )
+        st.stop()
 
     out = X.copy()
     out["target"] = y
-
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     out.dropna().to_parquet(DATA_PATH)
-
 
 
 # Build (cached) then load
 ensure_dataset()
 df = pd.read_parquet(DATA_PATH)
-# --- app proper ---
+
+# --- app proper (keep a single date picker) ---
 import plotly.express as px
 from datetime import date as _date
 from zoneinfo import ZoneInfo
 
 # compute coverage from the DataFrame index
-idx = pd.DatetimeIndex(df.index)                 # ensure DatetimeIndex
-days = pd.Index(idx.date)                        # array of python date objects
-
+idx = pd.DatetimeIndex(df.index)
+days = pd.Index(idx.date)
 if len(days) == 0:
     st.error("No rows found in the dataset.")
     st.stop()
 
-# force python datetime.date for all three args
-def _as_date(d): 
+def _as_pydate(d):
     return d if isinstance(d, _date) else pd.to_datetime(d).date()
 
-day_min = _as_date(days.min())
-day_max = _as_date(days.max())
-
-# choose a sane default within [min,max]
+day_min = _as_pydate(days.min())
+day_max = _as_pydate(days.max())
 today_ie = datetime.now(ZoneInfo("Europe/Dublin")).date()
 default_day = max(day_min, min(day_max, today_ie))
 
@@ -242,14 +239,7 @@ date = st.date_input(
     value=default_day,
     min_value=day_min,
     max_value=day_max,
-    # format="YYYY-MM-DD",  # optional
 )
-
-mask = (df.index.date == pd.to_datetime(date).date())
-
-
-
-st.set_page_config(page_title="Irish DAM Forecast", layout="wide")
 
 # Train quick model on all rows
 y = df.pop("target")
@@ -258,12 +248,7 @@ mdl.fit(df, y)
 
 st.title("Irish Day-Ahead Power Price Forecast (SEMOpx)")
 
-today_ie = dtmod.now(ZoneInfo("Europe/Dublin")).date()
-date = st.date_input("Choose a date to forecast", today_ie)
-
-mask = (df.index.date == pd.to_datetime(date).date())
-X_day = df.loc[mask]
-
+X_day = df.loc[df.index.date == pd.to_datetime(date).date()]
 if len(X_day):
     preds = mdl.predict(X_day)
     out = pd.DataFrame({"ts": X_day.index, "forecast_eur_mwh": preds}).set_index("ts")
@@ -271,7 +256,4 @@ if len(X_day):
     st.dataframe(out)
     st.plotly_chart(px.line(out, y="forecast_eur_mwh"), use_container_width=True)
 else:
-    st.info(
-        "No features for this day yet. Adjust the training window in config.yaml "
-        "or let the app build more data on first run."
-    )
+    st.info("No features for this day yet. Adjust the training window in config.yaml or fetch more data.")
