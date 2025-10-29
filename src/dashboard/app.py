@@ -191,21 +191,50 @@ def ensure_dataset():
     load_fc.name = "load_forecast_mw"
 
     # ---- Build features + target ----
+        # ---- Build features + target ----
+    # Align all to the common intersection first (prevents widespread NaNs)
+    common_idx = dam.index.intersection(load_fc.index)
+    if not ws.empty:
+        common_idx = common_idx.intersection(ws.index)
+    common_idx = common_idx.intersection(weather.index)
+
+    dam     = dam.reindex(common_idx)
+    load_fc = load_fc.reindex(common_idx)
+    ws      = ws.reindex(common_idx) if not ws.empty else ws
+    weather = weather.reindex(common_idx)
+
     X = build_feature_table(dam, load_fc, ws, weather)
     y = make_day_ahead_target(dam).reindex(X.index)
 
+    # Keep only rows that must exist for training/forecasting
+    must_have = ["dam_eur_mwh", "load_forecast_mw"]
+    keep = y.notna()
+    for c in must_have:
+        if c in X.columns:
+            keep &= X[c].notna()
+
+    X = X.loc[keep].copy()
+    y = y.loc[keep]
+
+    # For the rest of feature columns, fill gaps (don’t nuke the dataset)
+    filler_cols = [c for c in X.columns if c not in must_have]
+    if filler_cols:
+        X[filler_cols] = X[filler_cols].interpolate(limit_direction="both")
+        X[filler_cols] = X[filler_cols].fillna(method="ffill").fillna(method="bfill")
+
     if X.empty:
         st.error(
-            "No overlapping timestamps across ENTSO-E & weather feeds.\n"
-            "Try narrowing the window in config.yaml (e.g., 2025-07-01 → 2025-09-30), "
-            "or verify the feeds returned data."
+            "No overlapping timestamps across ENTSO-E & weather feeds for the chosen window. "
+            "Pick a recent window in config.yaml (e.g., 2025-07-01 → 2025-09-30) and rerun."
         )
         st.stop()
 
     out = X.copy()
     out["target"] = y
+
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    out.dropna().to_parquet(DATA_PATH)
+    out.to_parquet(DATA_PATH)  # NOTE: no global dropna() anymore
+
 
 
 # Build (cached) then load
