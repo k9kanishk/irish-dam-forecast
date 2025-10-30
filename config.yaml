@@ -15,7 +15,7 @@ features:
   include_interconnectors: true
   include_fuels: false
 train:
-  start: "2025-01-01"
+  start: "2025-06-01"
   end:   "2025-10-15"
   horizon_hours: 24
   model: xgb
