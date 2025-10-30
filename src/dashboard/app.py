@@ -94,23 +94,22 @@ def _chunk_edges(start_date, end_date, days=30):  # 30 keeps calls small/fast
 
 @st.cache_data(show_spinner=True)
 def ensure_dataset():
-    """Build data/processed/train.parquet once, using ENTSO-E + Open-Meteo, chunked and tolerant to empty chunks."""
+    """Build data/processed/train.parquet once, using ENTSO-E + Open-Meteo (chunked) and write it to DATA_PATH."""
     if DATA_PATH.exists():
         return  # already built
 
-    # Heavy imports only when needed (after sys.path fix above)
+    # Heavy imports only when needed
     from src.data.entsoe_api import Entsoe
     from src.data.weather import fetch_hourly
     from src.features.build_features import build_feature_table
     from src.features.targets import make_day_ahead_target
-    from entsoe.exceptions import NoMatchingDataError
     from src.data.eirgrid import load_eirgrid_folder
+    from entsoe.exceptions import NoMatchingDataError
 
-    # Load config
+    # ---- config & window ----
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    # Compute window (defaults if missing)
     start_cfg = _as_date(cfg.get("train", {}).get("start"))
     end_cfg   = _as_date(cfg.get("train", {}).get("end"))
     if not end_cfg:
@@ -120,27 +119,25 @@ def ensure_dataset():
     start_all = str(start_cfg)
     end_all   = str(end_cfg)
 
-    # --- FAST MODE: clamp window to last N days so first build is quick ---
-    MAX_DAYS = int(os.getenv("MAX_DAYS", "180"))  # tune 30–90 as you like
+    # fast clamp for first build
+    MAX_DAYS = int(os.getenv("MAX_DAYS", "180"))
     span_days = (pd.to_datetime(end_all) - pd.to_datetime(start_all)).days + 1
     if span_days > MAX_DAYS:
         start_all = str((pd.to_datetime(end_all) - pd.Timedelta(days=MAX_DAYS)).date())
         st.info(f"Fast mode: clamped window to last {MAX_DAYS} days → {start_all} → {end_all}")
 
-    # Token: ENV first, then Streamlit secrets
+    # ---- token & client ----
     token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
     if not token:
-        st.error("ENTSOE_TOKEN not found. Set it in .env (local) or in Streamlit → Settings → Secrets.")
+        st.error("ENTSOE_TOKEN not found. Put it in .env locally or Streamlit → Settings → Secrets.")
         st.stop()
-
     ent = Entsoe(token=token)
 
-    # ---- Chunked pulls to avoid 400s and tolerate empty chunks ----
+    # ---- chunked helpers ----
     def _pull_series(method_name: str) -> pd.Series:
         parts, empty_spans = [], []
         for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
-            # Optional: comment out next line if you don’t want logs on the page
-            st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
+            # st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
             for attempt in range(3):
                 try:
                     srs = getattr(ent, method_name)(start=s, end=e)
@@ -150,8 +147,7 @@ def ensure_dataset():
                         empty_spans.append((s, e))
                     break
                 except NoMatchingDataError:
-                    empty_spans.append((s, e))
-                    break
+                    empty_spans.append((s, e)); break
                 except Exception:
                     time.sleep(1.5 * (attempt + 1))
                     if attempt == 2:
@@ -159,14 +155,12 @@ def ensure_dataset():
         if not parts:
             return pd.Series(dtype=float)
         srs = pd.concat(parts).sort_index()
-        srs = srs[~srs.index.duplicated(keep="last")]
-        return srs
+        return srs[~srs.index.duplicated(keep="last")]
 
     def _pull_frame(method_name: str) -> pd.DataFrame:
         parts, empty_spans = [], []
         for i, (s, e) in enumerate(_chunk_edges(start_all, end_all, days=30), 1):
-            # Optional: comment out next line if you don’t want logs on the page
-            st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
+            # st.write(f"ENTSO-E {method_name} chunk {i}: {s} → {e}")
             for attempt in range(3):
                 try:
                     dfp = getattr(ent, method_name)(start=s, end=e)
@@ -176,8 +170,7 @@ def ensure_dataset():
                         empty_spans.append((s, e))
                     break
                 except NoMatchingDataError:
-                    empty_spans.append((s, e))
-                    break
+                    empty_spans.append((s, e)); break
                 except Exception:
                     time.sleep(1.5 * (attempt + 1))
                     if attempt == 2:
@@ -185,38 +178,34 @@ def ensure_dataset():
         if not parts:
             return pd.DataFrame()
         df = pd.concat(parts).sort_index()
-        df = df[~df.index.duplicated(keep="last")]
-        return df
+        return df[~df.index.duplicated(keep="last")]
 
-    eir = load_eirgrid_folder()
-    if not eir.empty:
-        X = X.join(eir, how="left")
-        # engineered: realized wind share (for backtests/analysis)
-        if "eirgrid_demand_mw" in X and "eirgrid_wind_mw" in X:
-            X["eir_real_wind_share"] = (X["eirgrid_wind_mw"] / X["eirgrid_demand_mw"].clip(lower=1)).clip(0,1)
-
+    # ---- fetch data ----
     st.caption(f"Fetching ENTSO-E (chunked): {start_all} → {end_all}")
     dam     = _pull_series("day_ahead_prices")
     load_fc = _pull_series("load_forecast")
     ws      = _pull_frame("wind_solar_forecast")
 
-    # Hard guards
     if dam.empty:
-        st.error("No day-ahead prices returned. Set a recent window in config.yaml (e.g., last 90–180 days) and rerun.")
+        st.error("No day-ahead prices returned. Set a recent window in config.yaml (e.g., last 90–180 days).")
         st.stop()
     if load_fc.empty:
-        st.error("No load forecast returned. Try a recent window in config.yaml and rerun.")
+        st.error("No load forecast returned. Try a recent window in config.yaml.")
         st.stop()
 
-    flows = _pull_series("net_imports")  # NEW: interconnector net imports
-    
+    # optional interconnector net imports (if your Entsoe() implements it)
+    try:
+        flows = _pull_series("net_imports")
+        if isinstance(flows, pd.Series) and flows.name != "net_imports_mw":
+            flows = flows.rename("net_imports_mw")
+    except AttributeError:
+        flows = pd.Series(dtype=float)  # method not available -> skip
 
-
-    # Weather
+    # Weather (your patched fetch_hourly handles archive vs forecast + clamping)
     lat = cfg["weather"]["lat"]; lon = cfg["weather"]["lon"]
     weather = fetch_hourly(lat, lon, start_all, end_all)
 
-    # ---- Timezone harmonization (make all indices Europe/Dublin tz-naive) ----
+    # ---- timezone harmonization (Europe/Dublin tz-naive) ----
     def _to_local_naive(obj, assume_utc: bool = False):
         if not hasattr(obj, "index") or not isinstance(obj.index, pd.DatetimeIndex):
             return obj
@@ -233,98 +222,83 @@ def ensure_dataset():
     load_fc = _to_local_naive(load_fc, assume_utc=False)
     ws      = _to_local_naive(ws, assume_utc=False)
     weather = _to_local_naive(weather, assume_utc=True)
+    if isinstance(flows, pd.Series) and len(flows):
+        flows = _to_local_naive(flows, assume_utc=False)
 
-    # Overlay when actuals exist
-    if len(X_day):
-        preds = mdl.predict(X_day)
-        out = pd.DataFrame({"ts": X_day.index, "forecast_eur_mwh": preds}).set_index("ts")
-        st.subheader("Hourly forecast")
-        st.dataframe(out)
+    # ---- index intersection before building features ----
+    common_idx = dam.index.intersection(load_fc.index)
+    if not ws.empty:       common_idx = common_idx.intersection(ws.index)
+    if len(weather):       common_idx = common_idx.intersection(weather.index)
+    if isinstance(flows, pd.Series) and len(flows):
+        common_idx = common_idx.intersection(flows.index)
 
-        # if actuals exist in df for this date, compute metrics and overlay
-        y_true_day = df.loc[mask, "target"]
-        if len(y_true_day) == len(out):
-            err = y_true_day - out["forecast_eur_mwh"]
-            rmse_d = (np.mean(err**2))**0.5
-            mape_d = (np.mean(np.abs(err) / np.clip(np.abs(y_true_day), 1e-6, None))) * 100
-            c1, c2 = st.columns(2)
-            c1.metric("RMSE (selected day)", f"{rmse_d:,.2f}")
-            c2.metric("MAPE (selected day)", f"{mape_d:,.2f}%")
+    dam     = dam.reindex(common_idx)
+    load_fc = load_fc.reindex(common_idx)
+    ws      = ws.reindex(common_idx) if not ws.empty else ws
+    weather = weather.reindex(common_idx)
+    if isinstance(flows, pd.Series) and len(flows):
+        flows = flows.reindex(common_idx)
 
-            both = out.join(y_true_day.rename("actual_eur_mwh"))
-            st.plotly_chart(px.line(both, y=["forecast_eur_mwh","actual_eur_mwh"]), use_container_width=True)
-        else:
-            st.info("No official DAM price yet for this day – showing forecast only.")
-        
-    
-    # ---- Ensure load_fc is a Series named 'load_forecast_mw' ----
+    # ---- ensure load_fc is a Series named 'load_forecast_mw' ----
     if isinstance(load_fc, pd.DataFrame):
         def _norm(c): return " ".join(map(str, c)).lower() if isinstance(c, tuple) else str(c).lower()
         colmap = {_norm(c): c for c in load_fc.columns}
         pick = None
         for key in ("load forecast", "forecast", "load"):
             for k, c in colmap.items():
-                if key in k:
-                    pick = c; break
-            if pick is not None:
-                break
+                if key in k: pick = c; break
+            if pick is not None: break
         if pick is None:
             pick = load_fc.columns[0]
         load_fc = load_fc[pick]
     load_fc = pd.to_numeric(load_fc, errors="coerce").astype("float64")
     load_fc.name = "load_forecast_mw"
 
-    # ---- Build features + target ----
-        # ---- Build features + target ----
-    # Align all to the common intersection first (prevents widespread NaNs)
-    common_idx = dam.index.intersection(load_fc.index)
-    if not ws.empty:
-        common_idx = common_idx.intersection(ws.index)
-    common_idx = common_idx.intersection(weather.index)
-
-    dam     = dam.reindex(common_idx)
-    load_fc = load_fc.reindex(common_idx)
-    ws      = ws.reindex(common_idx) if not ws.empty else ws
-    weather = weather.reindex(common_idx)
-
+    # ---- build features + target ----
     X = build_feature_table(dam, load_fc, ws, weather)
     y = make_day_ahead_target(dam).reindex(X.index)
 
-    # ... later, after X = build_feature_table(...):
-    if not flows.empty:
-        X = X.join(flows, how="left").assign(net_imports_mw=lambda d: d["net_imports_mw"].fillna(0))
-        # optional simple lags
+    # optional: add flows & simple lags
+    if isinstance(flows, pd.Series) and len(flows):
+        X = X.join(flows.to_frame(), how="left")
+        X["net_imports_mw"] = X["net_imports_mw"].fillna(0.0)
         for L in [1, 24]:
             X[f"net_imports_mw_lag{L}"] = X["net_imports_mw"].shift(L)
 
-    # Keep only rows that must exist for training/forecasting
+    # optional: EirGrid CSVs (actual demand/wind) -> derived feature
+    eir = load_eirgrid_folder()
+    if not eir.empty:
+        X = X.join(eir, how="left")
+        if "eirgrid_demand_mw" in X.columns and "eirgrid_wind_mw" in X.columns:
+            X["eir_real_wind_share"] = (
+                X["eirgrid_wind_mw"] / X["eirgrid_demand_mw"].clip(lower=1)
+            ).clip(0, 1)
+
+    # must-haves to keep rows
     must_have = ["dam_eur_mwh", "load_forecast_mw"]
     keep = y.notna()
     for c in must_have:
-        if c in X.columns:
-            keep &= X[c].notna()
-
+        if c in X.columns: keep &= X[c].notna()
     X = X.loc[keep].copy()
     y = y.loc[keep]
 
-    # For the rest of feature columns, fill gaps (don’t nuke the dataset)
+    # fill other feature gaps reasonably
     filler_cols = [c for c in X.columns if c not in must_have]
     if filler_cols:
         X[filler_cols] = X[filler_cols].interpolate(limit_direction="both")
         X[filler_cols] = X[filler_cols].fillna(method="ffill").fillna(method="bfill")
 
     if X.empty:
-        st.error(
-            "No overlapping timestamps across ENTSO-E & weather feeds for the chosen window. "
-            "Pick a recent window in config.yaml (e.g., 2025-07-01 → 2025-09-30) and rerun."
-        )
+        st.error("No overlapping timestamps across ENTSO-E & weather (and optional flows/EirGrid). "
+                 "Pick a recent window in config.yaml (e.g., 2025-07-01 → 2025-09-30) and rerun.")
         st.stop()
 
+    # ---- save parquet ----
     out = X.copy()
     out["target"] = y
-
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    out.to_parquet(DATA_PATH)  # NOTE: no global dropna() anymore
+    out.to_parquet(DATA_PATH)
+
 
 
 
