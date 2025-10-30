@@ -293,3 +293,74 @@ if len(X_day):
     st.plotly_chart(px.line(out, y="forecast_eur_mwh"), use_container_width=True)
 else:
     st.info("No features for this day yet. Adjust the training window in config.yaml or fetch more data.")
+
+
+# --- Forecast mode: predict for a future calendar day (e.g., tomorrow) ---
+from datetime import date as _date, timedelta
+from src.data.entsoe_api import Entsoe
+from src.data.weather import fetch_hourly
+from src.features.build_features import build_feature_table
+
+def make_features_for_day(target_day: _date) -> pd.DataFrame:
+    """Build X for the given UTC calendar day using: 
+       - historical DAM for lags (up to day-1),
+       - ENTSO-E load & wind/solar forecasts for target_day,
+       - weather forecasts for target_day.
+    """
+    token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
+    ent = Entsoe(token=token)
+
+    # for lags we need recent history up to D-1
+    start_hist = (pd.to_datetime(target_day) - pd.Timedelta(days=14)).date()
+    end_hist   = (pd.to_datetime(target_day) - pd.Timedelta(days=1)).date()
+
+    dam_hist = ent.day_ahead_prices(start=str(start_hist), end=str(end_hist))
+
+    # exogenous forecasts ON the target_day
+    load_fc  = ent.load_forecast(start=str(target_day), end=str(target_day))
+    ws_fc    = ent.wind_solar_forecast(start=str(target_day), end=str(target_day))
+
+    # weather (Open-Meteo) for the target window
+    lat = 53.4; lon = -8.2  # or read from config.yaml
+    weather = fetch_hourly(lat, lon, str(target_day), str(target_day))
+
+    # same harmonisation helpers as training
+    def _tz_fix(obj, assume_utc=False):
+        if not hasattr(obj, "index") or not isinstance(obj.index, pd.DatetimeIndex):
+            return obj
+        idx = obj.index
+        if idx.tz is None:
+            idx = idx.tz_localize("Europe/Brussels" if not assume_utc else "UTC")
+        idx = idx.tz_convert("Europe/Dublin").tz_localize(None)
+        out = obj.copy(); out.index = idx
+        return out
+
+    dam_hist = _tz_fix(dam_hist)
+    load_fc  = _tz_fix(load_fc)
+    ws_fc    = _tz_fix(ws_fc)
+    weather  = _tz_fix(weather, assume_utc=True)
+
+    # ensure load_fc is a Series named 'load_forecast_mw'
+    if isinstance(load_fc, pd.DataFrame):
+        load_fc = pd.to_numeric(load_fc.iloc[:, 0], errors="coerce")
+    load_fc.name = "load_forecast_mw"
+
+    X_full = build_feature_table(dam_hist, load_fc, ws_fc, weather)
+    # slice to the target day only
+    mask = X_full.index.date == target_day
+    return X_full.loc[mask]
+
+# --- UI: Tomorrow button
+with st.sidebar:
+    if st.button("Forecast tomorrow (T+1)"):
+        tgt = (datetime.now(ZoneInfo("Europe/Dublin")).date() + timedelta(days=1))
+        X_t1 = make_features_for_day(tgt)
+        if len(X_t1):
+            preds = mdl.predict(X_t1)
+            out_f = pd.DataFrame({"ts": X_t1.index, "forecast_eur_mwh": preds}).set_index("ts")
+            st.success(f"Forecast for {tgt}:")
+            st.dataframe(out_f)
+            st.plotly_chart(px.line(out_f, y="forecast_eur_mwh"), use_container_width=True)
+        else:
+            st.warning("Could not build features for tomorrow yet (inputs not available). Try later.")
+
