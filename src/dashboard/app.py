@@ -20,6 +20,48 @@ if str(REPO_ROOT) not in sys.path:
 load_dotenv()  # local dev uses .env; on Streamlit Cloud we'll use st.secrets
 
 DATA_PATH = Path("data/processed/train.parquet")
+
+from datetime import timedelta
+from entsoe.exceptions import NoMatchingDataError
+
+def _read_cached_dam(start: str, end: str) -> pd.Series:
+    """Get dam_eur_mwh from our parquet if API is missing."""
+    if not DATA_PATH.exists():
+        return pd.Series(dtype=float)
+    dfc = pd.read_parquet(DATA_PATH)
+    if "dam_eur_mwh" not in dfc.columns:
+        return pd.Series(dtype=float)
+    s = dfc["dam_eur_mwh"].copy()
+    s.index = pd.to_datetime(s.index)
+    s = s[(s.index >= pd.to_datetime(start)) & (s.index <= pd.to_datetime(end))]
+    s.name = "dam_eur_mwh"
+    return s
+
+def _get_dam_history(ent, start: str, end: str) -> pd.Series:
+    """Try API, then step the end date back, then fall back to parquet cache."""
+    # 1) try the full window
+    try:
+        s = ent.day_ahead_prices(start=start, end=end)
+        if s is not None and len(s):
+            return s
+    except NoMatchingDataError:
+        pass
+    # 2) back off the end date up to 14 days
+    for back in range(1, 15):
+        try:
+            end2 = str((pd.to_datetime(end) - pd.Timedelta(days=back)).date())
+            if pd.to_datetime(end2) < pd.to_datetime(start):
+                break
+            s = ent.day_ahead_prices(start=start, end=end2)
+            if s is not None and len(s):
+                return s
+        except NoMatchingDataError:
+            continue
+    # 3) fallback to cached parquet (best-effort)
+    s = _read_cached_dam(start, end)
+    return s
+
+
 # put near the top of app.py, after DATA_PATH is defined
 with st.sidebar:
     if st.button("Rebuild data"):
@@ -302,29 +344,39 @@ from src.data.weather import fetch_hourly
 from src.features.build_features import build_feature_table
 
 def make_features_for_day(target_day: _date) -> pd.DataFrame:
-    """Build X for the given UTC calendar day using: 
-       - historical DAM for lags (up to day-1),
-       - ENTSO-E load & wind/solar forecasts for target_day,
-       - weather forecasts for target_day.
-    """
+    """Build X for target_day using: recent DAM (for lags),
+    ENTSO-E forecasts on target_day, and weather for target_day."""
     token = os.getenv("ENTSOE_TOKEN") or st.secrets.get("ENTSOE_TOKEN")
     ent = Entsoe(token=token)
 
-    # for lags we need recent history up to D-1
+    # recent history for DAM lags
     start_hist = (pd.to_datetime(target_day) - pd.Timedelta(days=14)).date()
     end_hist   = (pd.to_datetime(target_day) - pd.Timedelta(days=1)).date()
+    dam_hist   = _get_dam_history(ent, str(start_hist), str(end_hist))
 
-    dam_hist = ent.day_ahead_prices(start=str(start_hist), end=str(end_hist))
+    # If we truly have no DAM at all, we can still try but warn that lags will be NaN
+    if dam_hist.empty:
+        st.warning("DAM history missing for recent days; continuing without price lags.")
 
-    # exogenous forecasts ON the target_day
-    load_fc  = ent.load_forecast(start=str(target_day), end=str(target_day))
-    ws_fc    = ent.wind_solar_forecast(start=str(target_day), end=str(target_day))
+    # exogenous forecasts ON the target day
+    try:
+        load_fc = ent.load_forecast(start=str(target_day), end=str(target_day))
+    except NoMatchingDataError:
+        st.warning("ENTSO-E load forecast not available for the selected day yet.")
+        return pd.DataFrame()
+
+    try:
+        ws_fc = ent.wind_solar_forecast(start=str(target_day), end=str(target_day))
+    except NoMatchingDataError:
+        st.warning("ENTSO-E wind/solar forecast not available for the selected day yet.")
+        return pd.DataFrame()
 
     # weather (Open-Meteo) for the target window
-    lat = 53.4; lon = -8.2  # or read from config.yaml
+    # (you can read lat/lon from config.yaml; hard-coded here for brevity)
+    lat, lon = 53.4, -8.2
     weather = fetch_hourly(lat, lon, str(target_day), str(target_day))
 
-    # same harmonisation helpers as training
+    # --- timezone harmonisation like training ---
     def _tz_fix(obj, assume_utc=False):
         if not hasattr(obj, "index") or not isinstance(obj.index, pd.DatetimeIndex):
             return obj
@@ -340,15 +392,19 @@ def make_features_for_day(target_day: _date) -> pd.DataFrame:
     ws_fc    = _tz_fix(ws_fc)
     weather  = _tz_fix(weather, assume_utc=True)
 
-    # ensure load_fc is a Series named 'load_forecast_mw'
+    # Ensure a Series named load_forecast_mw
     if isinstance(load_fc, pd.DataFrame):
+        # heuristics: take the first numeric column
         load_fc = pd.to_numeric(load_fc.iloc[:, 0], errors="coerce")
     load_fc.name = "load_forecast_mw"
 
+    # Build features (same function as training)
     X_full = build_feature_table(dam_hist, load_fc, ws_fc, weather)
-    # slice to the target day only
+
+    # Keep only the target day’s rows
     mask = X_full.index.date == target_day
     return X_full.loc[mask]
+
 
 # --- UI: Tomorrow button
 with st.sidebar:
