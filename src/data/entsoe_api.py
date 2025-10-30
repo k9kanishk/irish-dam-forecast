@@ -37,11 +37,8 @@ class Entsoe:
 
     # --- Load forecast -> always return a Series named 'load_forecast_mw' ---
     def load_forecast(self, start: str, end: str) -> pd.Series:
-    df = self.client.query_load_and_forecast(
-        self.area,
-        start=self._brussels(start),
-        end=self._brussels(end),
-    )
+        df = self.client.query_load_and_forecast(self.area,start=self._brussels(start), end=self._brussels(end),)
+
         def _norm(c): return " ".join(map(str, c)).lower()
         cand = [c for c in df.columns if "forecast" in _norm(c)]
         col = cand[0] if cand else df.columns[-1]
