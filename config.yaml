@@ -16,7 +16,7 @@ features:
   include_fuels: false
 train:
   start: "2025-06-01"
-  end:   "2025-12-31"
+  end:   "2025-10-29"
   horizon_hours: 24
   model: xgb
   cv_splits: 12
