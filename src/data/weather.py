@@ -72,13 +72,13 @@ def fetch_hourly(lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
     else:
         cloud = h["cloudcover"]
 
+    idx = (ts
+    .tz_localize(TZ, ambiguous="infer", nonexistent="shift_forward")
+    .tz_localize(None))
+
     df = pd.DataFrame(
-        {
-            "wind100m_ms": wind,
-            "temperature_2m": h["temperature_2m"],
-            "cloud_cover": cloud,
-        },
-        index=ts.tz_localize(TZ).tz_convert(TZ).tz_localize(None),
-    )
+    {"wind100m_ms": h["windspeed_100m"],
+        "temperature_2m": h["temperature_2m"],
+        "cloud_cover": cloud,},index=idx,)
     df = df[~df.index.duplicated(keep="last")].sort_index()
     return df
