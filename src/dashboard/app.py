@@ -20,6 +20,13 @@ if str(REPO_ROOT) not in sys.path:
 load_dotenv()  # local dev uses .env; on Streamlit Cloud we'll use st.secrets
 
 DATA_PATH = Path("data/processed/train.parquet")
+# put near the top of app.py, after DATA_PATH is defined
+with st.sidebar:
+    if st.button("Rebuild data"):
+        DATA_PATH.unlink(missing_ok=True)
+        st.cache_data.clear()
+        st.rerun()
+
 
 
 def _as_date(s):
