@@ -104,6 +104,7 @@ def ensure_dataset():
     from src.features.build_features import build_feature_table
     from src.features.targets import make_day_ahead_target
     from entsoe.exceptions import NoMatchingDataError
+    from src.data.eirgrid import load_eirgrid_folder
 
     # Load config
     with open("config.yaml", "r", encoding="utf-8") as f:
@@ -187,6 +188,13 @@ def ensure_dataset():
         df = df[~df.index.duplicated(keep="last")]
         return df
 
+    eir = load_eirgrid_folder()
+    if not eir.empty:
+        X = X.join(eir, how="left")
+        # engineered: realized wind share (for backtests/analysis)
+        if "eirgrid_demand_mw" in X and "eirgrid_wind_mw" in X:
+            X["eir_real_wind_share"] = (X["eirgrid_wind_mw"] / X["eirgrid_demand_mw"].clip(lower=1)).clip(0,1)
+
     st.caption(f"Fetching ENTSO-E (chunked): {start_all} → {end_all}")
     dam     = _pull_series("day_ahead_prices")
     load_fc = _pull_series("load_forecast")
@@ -201,12 +209,7 @@ def ensure_dataset():
         st.stop()
 
     flows = _pull_series("net_imports")  # NEW: interconnector net imports
-    # ... later, after X = build_feature_table(...):
-    if not flows.empty:
-        X = X.join(flows, how="left").assign(net_imports_mw=lambda d: d["net_imports_mw"].fillna(0))
-        # optional simple lags
-        for L in [1, 24]:
-            X[f"net_imports_mw_lag{L}"] = X["net_imports_mw"].shift(L)
+    
 
 
     # Weather
@@ -286,6 +289,13 @@ def ensure_dataset():
 
     X = build_feature_table(dam, load_fc, ws, weather)
     y = make_day_ahead_target(dam).reindex(X.index)
+
+    # ... later, after X = build_feature_table(...):
+    if not flows.empty:
+        X = X.join(flows, how="left").assign(net_imports_mw=lambda d: d["net_imports_mw"].fillna(0))
+        # optional simple lags
+        for L in [1, 24]:
+            X[f"net_imports_mw_lag{L}"] = X["net_imports_mw"].shift(L)
 
     # Keep only rows that must exist for training/forecasting
     must_have = ["dam_eur_mwh", "load_forecast_mw"]
