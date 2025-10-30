@@ -71,7 +71,7 @@ def ensure_dataset():
     end_all   = str(end_cfg)
 
     # --- FAST MODE: clamp window to last N days so first build is quick ---
-    MAX_DAYS = int(os.getenv("MAX_DAYS", "60"))  # tune 30–90 as you like
+    MAX_DAYS = int(os.getenv("MAX_DAYS", "180"))  # tune 30–90 as you like
     span_days = (pd.to_datetime(end_all) - pd.to_datetime(start_all)).days + 1
     if span_days > MAX_DAYS:
         start_all = str((pd.to_datetime(end_all) - pd.Timedelta(days=MAX_DAYS)).date())
