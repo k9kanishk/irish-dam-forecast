@@ -200,6 +200,15 @@ def ensure_dataset():
         st.error("No load forecast returned. Try a recent window in config.yaml and rerun.")
         st.stop()
 
+    flows = _pull_series("net_imports")  # NEW: interconnector net imports
+    # ... later, after X = build_feature_table(...):
+    if not flows.empty:
+        X = X.join(flows, how="left").assign(net_imports_mw=lambda d: d["net_imports_mw"].fillna(0))
+        # optional simple lags
+        for L in [1, 24]:
+            X[f"net_imports_mw_lag{L}"] = X["net_imports_mw"].shift(L)
+
+
     # Weather
     lat = cfg["weather"]["lat"]; lon = cfg["weather"]["lon"]
     weather = fetch_hourly(lat, lon, start_all, end_all)
@@ -228,19 +237,21 @@ def ensure_dataset():
         out = pd.DataFrame({"ts": X_day.index, "forecast_eur_mwh": preds}).set_index("ts")
         st.subheader("Hourly forecast")
         st.dataframe(out)
-        
-        # if the selected date <= last available DAM date, overlay actuals
-        last_actual = df.index.max()
-        if out.index.max() <= last_actual:
-            # 'dam' series already fetched when building the dataset; reload from parquet
-            hist = pd.read_parquet(DATA_PATH)
-            actual = hist.reindex(out.index)["target"]  # target was next-day price
-            both = out.join(actual.rename("actual_eur_mwh"))
-            st.plotly_chart(px.line(both, y=["forecast_eur_mwh","actual_eur_mwh"]),use_container_width=True)
+
+        # if actuals exist in df for this date, compute metrics and overlay
+        y_true_day = df.loc[mask, "target"]
+        if len(y_true_day) == len(out):
+            err = y_true_day - out["forecast_eur_mwh"]
+            rmse_d = (np.mean(err**2))**0.5
+            mape_d = (np.mean(np.abs(err) / np.clip(np.abs(y_true_day), 1e-6, None))) * 100
+            c1, c2 = st.columns(2)
+            c1.metric("RMSE (selected day)", f"{rmse_d:,.2f}")
+            c2.metric("MAPE (selected day)", f"{mape_d:,.2f}%")
+
+            both = out.join(y_true_day.rename("actual_eur_mwh"))
+            st.plotly_chart(px.line(both, y=["forecast_eur_mwh","actual_eur_mwh"]), use_container_width=True)
         else:
             st.info("No official DAM price yet for this day – showing forecast only.")
-
-
         
     
     # ---- Ensure load_fc is a Series named 'load_forecast_mw' ----
@@ -427,19 +438,24 @@ def make_features_for_day(target_day: _date) -> pd.DataFrame:
     return X_full.loc[mask]
 
 
-# --- UI: Tomorrow button
+# --- one-click T+1 forecast in the sidebar ---
+from datetime import timedelta
 with st.sidebar:
     if st.button("Forecast tomorrow (T+1)"):
         tgt = (datetime.now(ZoneInfo("Europe/Dublin")).date() + timedelta(days=1))
-        X_t1 = make_features_for_day(tgt)
+        try:
+            X_t1 = make_features_for_day(tgt)   # your function
+        except Exception:
+            X_t1 = pd.DataFrame()
         if len(X_t1):
             preds = mdl.predict(X_t1)
             out_f = pd.DataFrame({"ts": X_t1.index, "forecast_eur_mwh": preds}).set_index("ts")
-            st.success(f"Forecast for {tgt}:")
+            st.success(f"T+1 forecast for {tgt.isoformat()}")
             st.dataframe(out_f)
             st.plotly_chart(px.line(out_f, y="forecast_eur_mwh"), use_container_width=True)
         else:
-            st.warning("Could not build features for tomorrow yet (inputs not available). Try later.")
+            st.warning("Could not build features for T+1 (API window empty). Try again later.")
+
 
 
 # --- Backtest (last N days) ---
@@ -466,4 +482,55 @@ with st.sidebar:
         st.success(f"RMSE: {rmse:,.2f}  |  MAPE: {mape:,.2f}%")
         st.line_chart(df_eval.resample("H").mean())
 
+
+# --- Walk-forward CV over daily blocks ---
+import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+def walk_forward_cv(df_full: pd.DataFrame, days_per_fold:int=1, n_folds:int=14, min_train_days:int=30):
+    data = df_full.copy()
+    y_all = data.pop("target")
+    X_all = data
+
+    # ensure strictly time-ordered
+    X_all = X_all.sort_index()
+    y_all = y_all.reindex(X_all.index)
+
+    day_index = pd.Index(X_all.index.date)
+    unique_days = np.array(sorted(pd.unique(day_index)))
+
+    results = []
+    for k in range(n_folds):
+        # test window = the k-th day from the end (walk backward) – adjust if you prefer forward
+        test_day = unique_days[-(k+1)]
+        # training covers everything strictly before test_day, but at least min_train_days
+        train_cut = pd.to_datetime(test_day) - pd.Timedelta(days=min_train_days)
+        train_mask = (X_all.index.date < test_day) & (X_all.index >= train_cut)
+        test_mask  = (X_all.index.date == test_day)
+
+        if train_mask.sum() < 24 or test_mask.sum() == 0:
+            continue
+
+        Xtr, ytr = X_all.loc[train_mask], y_all.loc[train_mask]
+        Xte, yte = X_all.loc[test_mask],  y_all.loc[test_mask]
+
+        mdl_cv = __import__("src.models.xgb_model", fromlist=["make_model"]).make_model()
+        mdl_cv.fit(Xtr, ytr)
+        pred = mdl_cv.predict(Xte)
+
+        rmse = mean_squared_error(yte, pred, squared=False)
+        mape = np.mean(np.abs((yte - pred) / np.clip(np.abs(yte), 1e-6, None))) * 100
+        results.append({"day": test_day, "rmse": rmse, "mape": mape})
+
+    res = pd.DataFrame(results).sort_values("day")
+    return res, res["rmse"].mean(), res["mape"].mean()
+
+# in the sidebar:
+with st.sidebar:
+    if st.button("Walk-forward CV (14 folds)"):
+        res, rmse_avg, mape_avg = walk_forward_cv(df, n_folds=14, min_train_days=30)
+        st.write(res)
+        c1, c2 = st.columns(2)
+        c1.metric("Walk-forward RMSE (avg)", f"{rmse_avg:,.2f}")
+        c2.metric("Walk-forward MAPE (avg)", f"{mape_avg:,.2f}%")
 
