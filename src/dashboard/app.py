@@ -225,19 +225,33 @@ def ensure_dataset():
     if isinstance(flows, pd.Series) and len(flows):
         flows = _to_local_naive(flows, assume_utc=False)
 
+    def _dedup_index(obj):
+        if hasattr(obj, "index"):
+            return obj.loc[~obj.index.duplicated(keep="last")]
+        return obj
+
+    dam     = _dedup_index(dam)
+    load_fc = _dedup_index(load_fc)
+    ws      = _dedup_index(ws)        # <— usually the culprit (DST fall-back)
+    weather = _dedup_index(weather)
+    if isinstance(flows, (pd.Series, pd.DataFrame)) and len(flows):
+        flows = _dedup_index(flows)
+
+
     # ---- index intersection before building features ----
     common_idx = dam.index.intersection(load_fc.index)
-    if not ws.empty:       common_idx = common_idx.intersection(ws.index)
-    if len(weather):       common_idx = common_idx.intersection(weather.index)
-    if isinstance(flows, pd.Series) and len(flows):
-        common_idx = common_idx.intersection(flows.index)
+    if not ws.empty:
+        common_idx = common_idx.intersection(ws.index)
+    common_idx = common_idx.intersection(weather.index)
+    common_idx = pd.DatetimeIndex(common_idx.unique()).sort_values()
 
     dam     = dam.reindex(common_idx)
     load_fc = load_fc.reindex(common_idx)
     ws      = ws.reindex(common_idx) if not ws.empty else ws
     weather = weather.reindex(common_idx)
-    if isinstance(flows, pd.Series) and len(flows):
+    if isinstance(flows, (pd.Series, pd.DataFrame)) and len(flows):
         flows = flows.reindex(common_idx)
+
 
     # ---- ensure load_fc is a Series named 'load_forecast_mw' ----
     if isinstance(load_fc, pd.DataFrame):
