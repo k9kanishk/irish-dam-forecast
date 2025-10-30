@@ -420,3 +420,29 @@ with st.sidebar:
         else:
             st.warning("Could not build features for tomorrow yet (inputs not available). Try later.")
 
+
+# --- Backtest (last N days) ---
+import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+def backtest_last_n_days(df_full: pd.DataFrame, n_days: int = 14):
+    data = df_full.copy()
+    y = data.pop("target")
+    X = data
+    cutoff = (X.index.max().date() - pd.Timedelta(days=n_days)).date()
+    train = X.index.date < cutoff
+    Xtr, ytr, Xte, yte = X.loc[train], y.loc[train], X.loc[~train], y.loc[~train]
+    mdl_bt = __import__("src.models.xgb_model", fromlist=["make_model"]).make_model()
+    mdl_bt.fit(Xtr, ytr)
+    pred = mdl_bt.predict(Xte)
+    rmse = mean_squared_error(yte, pred, squared=False)
+    mape = np.mean(np.abs((yte - pred) / np.clip(np.abs(yte), 1e-6, None))) * 100
+    return rmse, mape, pd.DataFrame({"actual": yte, "pred": pred}, index=Xte.index).sort_index()
+
+with st.sidebar:
+    if st.button("Run 14-day backtest"):
+        rmse, mape, df_eval = backtest_last_n_days(df)
+        st.success(f"RMSE: {rmse:,.2f}  |  MAPE: {mape:,.2f}%")
+        st.line_chart(df_eval.resample("H").mean())
+
+
