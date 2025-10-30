@@ -10,6 +10,46 @@ AREA_IE = "IE_SEM"                     # <- use IE (works across entsoe-py versi
 TZ_QUERY = ZoneInfo("Europe/Brussels")  # entsoe-py expects Brussels tz
 
 class Entsoe:
+    def _try_pairs(self, func, pairs, **kwargs):
+        """Try several border code pairs until one works; return first Series/DataFrame."""
+        for a, b in pairs:
+            try:
+                return func(a, b, **kwargs)
+            except NoMatchingDataError:
+                continue
+            except Exception:
+                continue
+        # nothing worked
+        raise NoMatchingDataError
+
+    def net_imports(self, start: str, end: str) -> pd.Series:
+        """
+        Net imports into IE_SEM from GB. Positive = importing into IE.
+        """
+        # pairs to try (ENTSO-E codes vary by border)
+        pairs = [
+            ("GB", "IE_SEM"),
+            ("GB_GBN", "IE_SEM"),
+            ("GB_NIR", "IE_SEM"),
+        ]
+
+        # flow INTO IE (GB -> IE)
+        s_in = self._try_pairs(
+            self.client.query_crossborder_flows,
+            pairs=[(a, b) for a, b in pairs],
+            start=self._brussels(start),
+            end=self._brussels(end),
+        )
+        # flow OUT OF IE (IE -> GB)
+        s_out = self._try_pairs(
+            self.client.query_crossborder_flows,
+            pairs=[(b, a) for a, b in pairs],
+            start=self._brussels(start),
+            end=self._brussels(end),
+        )
+        s = s_in.rename("flow_in") - s_out.rename("flow_out")
+        s.name = "net_imports_mw"
+        return s
     def __init__(self, token: str | None = None, area: str = AREA_IE):
         token = token or os.getenv("ENTSOE_TOKEN")
         if not token:
