@@ -222,6 +222,27 @@ def ensure_dataset():
     ws      = _to_local_naive(ws, assume_utc=False)
     weather = _to_local_naive(weather, assume_utc=True)
 
+    # Overlay when actuals exist
+    if len(X_day):
+        preds = mdl.predict(X_day)
+        out = pd.DataFrame({"ts": X_day.index, "forecast_eur_mwh": preds}).set_index("ts")
+        st.subheader("Hourly forecast")
+        st.dataframe(out)
+        
+        # if the selected date <= last available DAM date, overlay actuals
+        last_actual = df.index.max()
+        if out.index.max() <= last_actual:
+            # 'dam' series already fetched when building the dataset; reload from parquet
+            hist = pd.read_parquet(DATA_PATH)
+            actual = hist.reindex(out.index)["target"]  # target was next-day price
+            both = out.join(actual.rename("actual_eur_mwh"))
+            st.plotly_chart(px.line(both, y=["forecast_eur_mwh","actual_eur_mwh"]),use_container_width=True)
+        else:
+            st.info("No official DAM price yet for this day – showing forecast only.")
+
+
+        
+    
     # ---- Ensure load_fc is a Series named 'load_forecast_mw' ----
     if isinstance(load_fc, pd.DataFrame):
         def _norm(c): return " ".join(map(str, c)).lower() if isinstance(c, tuple) else str(c).lower()
