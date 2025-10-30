@@ -83,6 +83,14 @@ def build_feature_table(
     else:
         df["wind_proxy"] = pd.NA
 
+
+      # --- NEW: forecast wind share of demand ---
+    wind_cols = [c for c in df.columns if "wind" in str(c).lower()]
+    if wind_cols:
+        df["wind_mw_fc"] = df[wind_cols].sum(axis=1)
+        df["wind_share_fc"] = (df["wind_mw_fc"] / df["load_forecast_mw"].clip(lower=1)).clip(0, 1)
+
+    
     # Lags & rolling stats (tolerate partial windows)
     for col in ["dam_eur_mwh", "load_forecast_mw", "wind_proxy"]:
         if col in df.columns:
