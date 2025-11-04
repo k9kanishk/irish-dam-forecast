@@ -1,10 +1,11 @@
 # src/data/entsoe_api.py
 from __future__ import annotations
 import os
-import pandas as pd
 from zoneinfo import ZoneInfo
-from entsoe import EntsoePandasClient
 from entsoe.exceptions import NoMatchingDataError
+from entsoe import EntsoePandasClient
+import pandas as pd
+import pytz, os
 
 AREA_IE = "IE_SEM"                     # <- use IE (works across entsoe-py versions)
 TZ_QUERY = ZoneInfo("Europe/Brussels")  # entsoe-py expects Brussels tz
@@ -52,6 +53,17 @@ class Entsoe:
         
         # Return empty if all fails
         return pd.Series(dtype=float, name="dam_eur_mwh")
+
+    def fetch_ie_dam_prices(start_date, end_date):
+        token = os.environ["ENTSOE_TOKEN"]
+        client = EntsoePandasClient(api_key=token)
+        tz = pytz.timezone("Europe/Dublin")
+        start = tz.localize(pd.Timestamp(start_date))
+        end = tz.localize(pd.Timestamp(end_date)) + pd.Timedelta(days=1)
+        # Bidding zone for SEM/IE
+        series = client.query_day_ahead_prices('IE', start=start, end=end)
+        df = series.tz_convert('UTC').to_frame('dam_eur_mwh').reset_index().rename(columns={'index':'ts_utc'})
+        return df
 
     def _try_pairs(self, func, pairs, **kwargs):
         """Try several border code pairs until one works; return first Series/DataFrame."""
