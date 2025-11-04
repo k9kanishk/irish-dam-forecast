@@ -15,8 +15,8 @@ features:
   include_interconnectors: true
   include_fuels: false
 train:
-  start: "2025-06-01"
-  end:   "2025-10-29"
+  start: "2025-07-01"    # Changed to more recent
+  end: "2025-10-31"      # Should be 3-5 days before today
   horizon_hours: 24
   model: xgb
   cv_splits: 12
