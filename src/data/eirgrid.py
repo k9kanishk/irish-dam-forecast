@@ -17,7 +17,14 @@ def load_eirgrid_folder(folder="data/eirgrid") -> pd.DataFrame:
         try:
             df = pd.read_csv(f)
             # normalize common column names
-            cols = {c.lower().strip(): c for c in df.columns}
+            def _safelower(c):
+                try:
+                    return str(c).lower().strip()
+                except Exception:
+                    return ""  # fallback for weird labels
+                    
+            cols = {_safelower(c): c for c in df.columns}
+
             # try to locate time/demand/wind/solar
             tcol = next(c for k,c in cols.items() if "time" in k or "datetime" in k or "date" in k)
             df["ts"] = pd.to_datetime(df[tcol])
