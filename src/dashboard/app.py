@@ -1,4 +1,4 @@
-# COMPLETE WORKING app.py - Replace your entire src/dashboard/app.py with this
+# FINAL FIXED app.py - Replace your entire src/dashboard/app.py with this
 
 import os
 import sys
@@ -228,12 +228,26 @@ def ensure_dataset():
     try:
         X = build_feature_table(dam, load_fc, ws, weather)
         y = make_day_ahead_target(dam).reindex(X.index)
+        
+        # CRITICAL FIX: Add the raw columns that build_feature_table might not include
+        if 'dam_eur_mwh' not in X.columns:
+            X['dam_eur_mwh'] = dam.reindex(X.index)
+        if 'load_forecast_mw' not in X.columns:
+            X['load_forecast_mw'] = load_fc.reindex(X.index)
+            
     except Exception as e:
         st.error(f"Feature building failed: {e}")
         st.stop()
     
-    # Filter valid rows
-    valid = y.notna() & X['dam_eur_mwh'].notna() & X['load_forecast_mw'].notna()
+    # Filter valid rows - check which columns actually exist
+    valid = y.notna()
+    
+    # Only check for columns that exist
+    if 'dam_eur_mwh' in X.columns:
+        valid = valid & X['dam_eur_mwh'].notna()
+    if 'load_forecast_mw' in X.columns:
+        valid = valid & X['load_forecast_mw'].notna()
+    
     X = X[valid]
     y = y[valid]
     
@@ -312,17 +326,23 @@ except FileNotFoundError:
 # Prepare for modeling
 y = df.pop('target') if 'target' in df.columns else pd.Series(index=df.index)
 
-# Train model
+# Train model - with fallback
+model = None
 try:
     from src.models.xgb_model import make_model
     model = make_model()
     model.fit(df, y)
-    st.success("✅ Model trained successfully")
+    st.success("✅ Model trained successfully (XGBoost)")
 except Exception as e:
-    st.warning(f"Using fallback model: {e}")
-    from sklearn.ensemble import RandomForestRegressor
-    model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-    model.fit(df, y)
+    st.warning(f"XGBoost failed ({e}), using Random Forest")
+    try:
+        from sklearn.ensemble import RandomForestRegressor
+        model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
+        model.fit(df, y)
+        st.success("✅ Model trained successfully (Random Forest)")
+    except Exception as e2:
+        st.error(f"Model training failed: {e2}")
+        st.stop()
 
 # === DATE SELECTION ===
 
@@ -351,10 +371,14 @@ if not day_data.empty:
     # Create results DataFrame
     results = pd.DataFrame({
         'Hour': day_data.index,
-        'Forecast (€/MWh)': predictions.round(2),
-        'Load (MW)': day_data['load_forecast_mw'].round(0) if 'load_forecast_mw' in day_data else 0,
-        'Wind (MW)': day_data.get('wind_total_mw', 0).round(0) if 'wind_total_mw' in day_data.columns else 0
+        'Forecast (€/MWh)': predictions.round(2)
     })
+    
+    # Add additional columns if they exist
+    if 'load_forecast_mw' in day_data.columns:
+        results['Load (MW)'] = day_data['load_forecast_mw'].round(0).values
+    if 'wind_total_mw' in day_data.columns:
+        results['Wind (MW)'] = day_data['wind_total_mw'].round(0).values
     
     # Display results
     col1, col2 = st.columns([2, 1])
@@ -425,14 +449,34 @@ with st.expander("🔍 Model Performance"):
     recent_data = df.iloc[-24*7:] if len(df) > 24*7 else df
     recent_y = y.iloc[-24*7:] if len(y) > 24*7 else y
     
-    if len(recent_data) > 0:
-        recent_pred = model.predict(recent_data)
-        
-        # Calculate metrics
-        from sklearn.metrics import mean_absolute_error, mean_squared_error
-        mae = mean_absolute_error(recent_y, recent_pred)
-        rmse = np.sqrt(mean_squared_error(recent_y, recent_pred))
-        
-        col1, col2 = st.columns(2)
-        col1.metric("MAE (7-day)", f"€{mae:.2f}/MWh")
-        col2.metric("RMSE (7-day)", f"€{rmse:.2f}/MWh")
+    if len(recent_data) > 0 and len(recent_y) > 0:
+        try:
+            recent_pred = model.predict(recent_data)
+            
+            # Calculate metrics
+            from sklearn.metrics import mean_absolute_error, mean_squared_error
+            mae = mean_absolute_error(recent_y, recent_pred)
+            rmse = np.sqrt(mean_squared_error(recent_y, recent_pred))
+            
+            col1, col2 = st.columns(2)
+            col1.metric("MAE (7-day)", f"€{mae:.2f}/MWh")
+            col2.metric("RMSE (7-day)", f"€{rmse:.2f}/MWh")
+        except Exception as e:
+            st.info(f"Cannot calculate metrics: {e}")
+
+# Add feature importance if possible
+with st.expander("📊 Feature Importance"):
+    try:
+        if hasattr(model, 'feature_importances_'):
+            importances = pd.DataFrame({
+                'Feature': df.columns,
+                'Importance': model.feature_importances_
+            }).sort_values('Importance', ascending=False).head(10)
+            
+            st.bar_chart(importances.set_index('Feature'))
+    except:
+        st.info("Feature importance not available for this model")
+
+# Footer
+st.markdown("---")
+st.caption("💡 Data source: ENTSO-E Transparency Platform | Weather: Open-Meteo | Built with Streamlit")
