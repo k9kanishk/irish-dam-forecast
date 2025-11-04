@@ -132,7 +132,7 @@ def ensure_dataset():
     if dam.empty:
         st.warning("No DAM prices available - creating synthetic data for demo")
         # Create realistic synthetic prices
-        hours = pd.date_range(start_date, end_date, freq='H', tz=None)
+        hours = pd.date_range(start_date, end_date, freq='h', tz=None)
         hourly_pattern = np.array([
             60, 58, 55, 53, 52, 54, 65, 85,  # Night to morning
             95, 92, 88, 85, 83, 84, 86, 88,  # Midday
@@ -150,7 +150,7 @@ def ensure_dataset():
     
     if load_fc.empty:
         st.warning("No load forecast - using typical pattern")
-        hours = dam.index if not dam.empty else pd.date_range(start_date, end_date, freq='H')
+        hours = dam.index if not dam.empty else pd.date_range(start_date, end_date, freq='h')
         base_load = 4500
         hourly_load = base_load + 800 * np.sin(2 * np.pi * (hours.hour - 6) / 24)
         load_fc = pd.Series(hourly_load + np.random.normal(0, 200, len(hours)), 
