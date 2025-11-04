@@ -10,6 +10,49 @@ AREA_IE = "IE_SEM"                     # <- use IE (works across entsoe-py versi
 TZ_QUERY = ZoneInfo("Europe/Brussels")  # entsoe-py expects Brussels tz
 
 class Entsoe:
+    def __init__(self, token: str | None = None, area: str = "IE"):  # Use IE not IE_SEM
+        token = token or os.getenv("ENTSOE_TOKEN")
+        if not token:
+            raise RuntimeError("ENTSOE_TOKEN not set")
+        self.client = EntsoePandasClient(api_key=token, timeout=30, retry_count=2)
+        self.area = area
+    
+    def day_ahead_prices(self, start: str, end: str) -> pd.Series:
+        """Fetch with automatic retry on older dates"""
+        from datetime import timedelta
+        
+        # Try original dates
+        try:
+            s = self.client.query_day_ahead_prices(
+                self.area,
+                start=pd.Timestamp(start).tz_localize('Europe/Dublin'),
+                end=pd.Timestamp(end).tz_localize('Europe/Dublin')
+            )
+            if s is not None and len(s) > 0:
+                s.name = "dam_eur_mwh"
+                return s
+        except Exception as e:
+            print(f"Initial attempt failed: {e}")
+        
+        # Try stepping back up to 7 days
+        for days_back in range(1, 8):
+            try:
+                new_end = pd.Timestamp(end) - timedelta(days=days_back)
+                s = self.client.query_day_ahead_prices(
+                    self.area,
+                    start=pd.Timestamp(start).tz_localize('Europe/Dublin'),
+                    end=new_end.tz_localize('Europe/Dublin')
+                )
+                if s is not None and len(s) > 0:
+                    print(f"Got data up to {new_end.date()} ({days_back} days back)")
+                    s.name = "dam_eur_mwh"
+                    return s
+            except:
+                continue
+        
+        # Return empty if all fails
+        return pd.Series(dtype=float, name="dam_eur_mwh")
+
     def _try_pairs(self, func, pairs, **kwargs):
         """Try several border code pairs until one works; return first Series/DataFrame."""
         for a, b in pairs:
@@ -50,12 +93,6 @@ class Entsoe:
         s = s_in.rename("flow_in") - s_out.rename("flow_out")
         s.name = "net_imports_mw"
         return s
-    def __init__(self, token: str | None = None, area: str = AREA_IE):
-        token = token or os.getenv("ENTSOE_TOKEN")
-        if not token:
-            raise RuntimeError("ENTSOE_TOKEN not set. Put it in .env or st.secrets.")
-        self.client = EntsoePandasClient(api_key=token, timeout=30, retry_count=1)
-        self.area = area
 
     def _brussels(self, dt_like) -> pd.Timestamp:
         ts = pd.Timestamp(dt_like)
@@ -63,17 +100,6 @@ class Entsoe:
             return ts.tz_localize(TZ_QUERY)
         return ts.tz_convert(TZ_QUERY)
 
-    # -------- Prices --------
-    def day_ahead_prices(self, start: str, end: str) -> pd.Series:
-        s = self.client.query_day_ahead_prices(
-            self.area,
-            start=self._brussels(start),
-            end=self._brussels(end),
-        )
-        if s is None or len(s) == 0:
-            raise NoMatchingDataError("No day-ahead prices returned.")
-        s.name = "dam_eur_mwh"
-        return s
 
     # --- Load forecast -> always return a Series named 'load_forecast_mw' ---
     def load_forecast(self, start: str, end: str) -> pd.Series:
@@ -85,13 +111,6 @@ class Entsoe:
         s = pd.to_numeric(df[col], errors="coerce")
         s.name = "load_forecast_mw"
         return s
-    
-    
-
-    
-   
-
-
 
     # -------- Wind & Solar forecast (compose from PSR types) --------
     def wind_solar_forecast(self, start: str, end: str) -> pd.DataFrame:
