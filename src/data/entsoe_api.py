@@ -105,7 +105,13 @@ class Entsoe:
     def load_forecast(self, start: str, end: str) -> pd.Series:
         df = self.client.query_load_and_forecast(self.area,start=self._brussels(start), end=self._brussels(end),)
 
-        def _norm(c): return " ".join(map(str, c)).lower()
+        def _norm(c):
+            # Handle both tuple-like and scalar labels safely
+            try:
+                return " ".join(map(str, c)).lower()
+            except TypeError:
+                return str(c).lower()
+
         cand = [c for c in df.columns if "forecast" in _norm(c)]
         col = cand[0] if cand else df.columns[-1]
         s = pd.to_numeric(df[col], errors="coerce")
