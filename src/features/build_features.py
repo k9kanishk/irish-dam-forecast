@@ -37,7 +37,8 @@ def build_feature_table(
     # Add wind/solar if available
     if isinstance(windsol_fc, pd.DataFrame) and not windsol_fc.empty:
         keep_cols = [c for c in windsol_fc.columns 
-                     if any(x in c.lower() for x in ['wind', 'solar'])]
+                     if any(x in str(c).lower() for x in ['wind', 'solar'])]
+
         for col in keep_cols:
             df[col] = windsol_fc[col]
     
