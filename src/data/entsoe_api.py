@@ -36,14 +36,14 @@ class Entsoe:
             start = tz.localize(pd.Timestamp(start_date))
             end   = tz.localize(pd.Timestamp(end_date)) + pd.Timedelta(days=1)
 
-           ser = client.query_day_ahead_prices("IE", start=start, end=end, timeout=60)
-           if ser is None or len(ser) == 0:
-               raise RuntimeError("ENTSO-E returned empty series for IE day-ahead prices.")
-           ser = ser.tz_convert("UTC")
-           df = ser.to_frame("dam_eur_mwh")
-           df = df[~df.index.duplicated(keep="last")].sort_index()
-           df.to_parquet(fp)
-           return df
+            ser = client.query_day_ahead_prices("IE", start=start, end=end, timeout=60)
+            if ser is None or len(ser) == 0:
+                raise RuntimeError("ENTSO-E returned empty series for IE day-ahead prices.")
+            ser = ser.tz_convert("UTC")
+            df = ser.to_frame("dam_eur_mwh")
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+            df.to_parquet(fp)
+            return df
 
     def fetch_ie_dam_recent(days: int = 21, force_refresh: bool = True) -> pd.DataFrame:
         tz = pytz.timezone("Europe/Dublin")
