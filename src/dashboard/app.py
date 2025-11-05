@@ -127,42 +127,22 @@ def ensure_dataset():
     st.caption("Fetching wind/solar forecast...")
     ws = safe_fetch("wind_solar_forecast", start_date, end_date, is_dataframe=True)
     
-    # === HANDLE MISSING DATA ===
+    st.info("Fetching DAM prices (SEMOpx HRP via reports API)...")
+    try:
+        dam_df = fetch_dam_hrp_recent(days=28, cache_dir=Path("data/raw/semopx/hrp"), force=False)
+        st.success(f"DAM (HRP) loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()} ({len(dam_df)} rows)")
+    except Exception as e:
+        st.warning(f"SEMOpx HRP failed ({e}); falling back to ENTSO-E")
+        from src.data.entsoe_api import fetch_ie_dam_recent
+        entsoe_df = fetch_ie_dam_recent(days=28, force_refresh=True)
+        dam_df = entsoe_df.rename_axis("ts_utc").reset_index().rename(columns={"dam_eur_mwh": "dam_eur_mwh"})
+        st.success(f"ENTSO-E DAM loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()}")
+
+    # downstream: dam_df must be ('ts_utc', 'dam_eur_mwh'), UTC tz-aware, hourly
+    dam_df["ts_utc"] = pd.to_datetime(dam_df["ts_utc"], utc=True)
+    dam_df = dam_df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
     
-    if dam.empty:
-        st.warning("No DAM prices available - creating synthetic data for demo")
-        # Create realistic synthetic prices
-        hours = pd.date_range(start_date, end_date, freq='h', tz=None)
-        hourly_pattern = np.array([
-            60, 58, 55, 53, 52, 54, 65, 85,  # Night to morning
-            95, 92, 88, 85, 83, 84, 86, 88,  # Midday
-            95, 105, 98, 85, 75, 70, 65, 62  # Evening to night
-        ])
-        
-        prices = []
-        for h in hours:
-            base = hourly_pattern[h.hour]
-            daily_var = np.random.normal(1.0, 0.15)
-            price = base * daily_var
-            prices.append(price)
-        
-        dam = pd.Series(prices, index=hours, name='dam_eur_mwh')
     
-    if load_fc.empty:
-        st.warning("No load forecast - using typical pattern")
-        hours = dam.index if not dam.empty else pd.date_range(start_date, end_date, freq='h')
-        base_load = 4500
-        hourly_load = base_load + 800 * np.sin(2 * np.pi * (hours.hour - 6) / 24)
-        load_fc = pd.Series(hourly_load + np.random.normal(0, 200, len(hours)), 
-                           index=hours, name='load_forecast_mw')
-    
-    if ws.empty:
-        st.warning("No wind/solar data - using seasonal patterns")
-        hours = dam.index
-        ws = pd.DataFrame(index=hours)
-        # Ireland has good wind resources
-        ws['wind_total_mw'] = 1500 + 1000 * np.random.random(len(hours))
-        ws['solar_mw'] = np.maximum(0, 100 * np.sin(2 * np.pi * hours.hour / 24))
     
     # === WEATHER DATA ===
     st.caption("Fetching weather data...")
