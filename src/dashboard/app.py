@@ -1,5 +1,7 @@
 # FINAL FIXED app.py - Replace your entire src/dashboard/app.py with this
 
+from src.data.semopx_api import fetch_dam_hrp_recent
+from src.data.entsoe_api import fetch_ie_dam_recent
 import os
 import sys
 import time
@@ -129,19 +131,20 @@ def ensure_dataset():
     
     st.info("Fetching DAM prices (SEMOpx HRP via reports API)...")
     try:
-        dam_df = fetch_dam_hrp_recent(days=28, cache_dir=Path("data/raw/semopx/hrp"), force=False)
+        dam_df = fetch_dam_hrp_recent(days=28)
         st.success(f"DAM (HRP) loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()} ({len(dam_df)} rows)")
     except Exception as e:
         st.warning(f"SEMOpx HRP failed ({e}); falling back to ENTSO-E")
-        from src.data.entsoe_api import fetch_ie_dam_recent
         entsoe_df = fetch_ie_dam_recent(days=28, force_refresh=True)
-        dam_df = entsoe_df.rename_axis("ts_utc").reset_index().rename(columns={"dam_eur_mwh": "dam_eur_mwh"})
+        dam_df = entsoe_df.rename_axis("ts_utc").reset_index()
         st.success(f"ENTSO-E DAM loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()}")
 
-    # downstream: dam_df must be ('ts_utc', 'dam_eur_mwh'), UTC tz-aware, hourly
     dam_df["ts_utc"] = pd.to_datetime(dam_df["ts_utc"], utc=True)
     dam_df = dam_df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
-    
+    min_dt = dam_df["ts_utc"].min().tz_convert("Europe/Dublin").date()
+    max_dt = (dam_df["ts_utc"].max().tz_convert("Europe/Dublin") - pd.Timedelta(hours=1)).date()
+    selected = st.date_input("Select forecast date:", value=max_dt, min_value=min_dt, max_value=max_dt)
+
     
     
     # === WEATHER DATA ===
