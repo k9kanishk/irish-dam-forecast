@@ -2,172 +2,70 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-from zoneinfo import ZoneInfo
-from entsoe.exceptions import NoMatchingDataError
-from entsoe import EntsoePandasClient
 import pandas as pd
-import pytz, os
+import pytz
+from zoneinfo import ZoneInfo
+from entsoe import EntsoePandasClient
+from entsoe.exceptions import NoMatchingDataError
 
-AREA_IE = "IE_SEM"                     # <- use IE (works across entsoe-py versions)
-TZ_QUERY = ZoneInfo("Europe/Brussels")  # entsoe-py expects Brussels tz
+TZ_QUERY = ZoneInfo("Europe/Brussels")
 
-def fetch_ie_dam_prices_entsoe(start_date: str, end_date: str, cache_dir: Path = Path("data/processed"), force_refresh: bool = False) -> pd.DataFrame:
+def fetch_ie_dam_prices_entsoe(
+    start_date: str,
+    end_date: str,
+    cache_dir: Path = Path("data/processed"),
+    force_refresh: bool = False,
+) -> pd.DataFrame:
+    """Fetch IE day-ahead prices from ENTSO-E and return a UTC-indexed df with 'dam_eur_mwh'."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     fp = cache_dir / f"dam_ie_{start_date}_{end_date}.parquet"
+
     if fp.exists() and not force_refresh:
         df = pd.read_parquet(fp)
-        df.index = pd.DatetimeIndex(df.index, tz="UTC")
-        df["dam_eur_mwh"] = df["dam_eur_mwh"].astype(float)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, utc=True)
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        df["dam_eur_mwh"] = pd.to_numeric(df["dam_eur_mwh"], errors="coerce")
         return df
-            
-        token = os.getenv("ENTSOE_TOKEN")
-        if not token:
-            raise RuntimeError("ENTSOE_TOKEN not set.")
-        client = EntsoePandasClient(api_key=token)
-        tz = pytz.timezone("Europe/Dublin")
-        start = tz.localize(pd.Timestamp(start_date))
-        end   = tz.localize(pd.Timestamp(end_date)) + pd.Timedelta(days=1)
 
-        ser = client.query_day_ahead_prices("IE", start=start, end=end, timeout=60)
-        if ser is None or len(ser) == 0:
-            raise RuntimeError("ENTSO-E returned empty series for IE day-ahead prices.")
-        ser = ser.tz_convert("UTC")
-        df = ser.to_frame("dam_eur_mwh")
-        df = df[~df.index.duplicated(keep="last")].sort_index()
-        df.to_parquet(fp)
-        return df
+    token = os.getenv("ENTSOE_TOKEN")
+    if not token:
+        raise RuntimeError("ENTSOE_TOKEN not set.")
+
+    client = EntsoePandasClient(api_key=token)
+    tz = pytz.timezone("Europe/Dublin")
+    start = tz.localize(pd.Timestamp(start_date))
+    end   = tz.localize(pd.Timestamp(end_date)) + pd.Timedelta(days=1)  # end exclusive
+
+    ser = client.query_day_ahead_prices("IE", start=start, end=end, timeout=60)
+    if ser is None or len(ser) == 0:
+        raise RuntimeError("ENTSO-E returned empty series for IE day-ahead prices.")
+
+    ser = ser.tz_convert("UTC")
+    df = ser.to_frame("dam_eur_mwh")
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    df.to_parquet(fp)
+    return df
+
 
 def fetch_ie_dam_recent(days: int = 21, force_refresh: bool = True) -> pd.DataFrame:
+    """Return last `days` of IE prices (UTC-indexed df)."""
     tz = pytz.timezone("Europe/Dublin")
     today = pd.Timestamp.now(tz).normalize()
     start = (today - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
     end   = today.strftime("%Y-%m-%d")
     return fetch_ie_dam_prices_entsoe(start, end, force_refresh=force_refresh)
 
+
 class Entsoe:
-    def __init__(self, token: str | None = None, area: str = "IE"):  # Use IE not IE_SEM
+    """Small wrapper to fetch other fundamentals consistently."""
+    def __init__(self, token: str | None = None, area: str = "IE"):
         token = token or os.getenv("ENTSOE_TOKEN")
         if not token:
             raise RuntimeError("ENTSOE_TOKEN not set")
-        self.client = EntsoePandasClient(api_key=token, timeout=30, retry_count=2)
+        self.client = EntsoePandasClient(api_key=token)  # keep constructor simple
         self.area = area
-
-    
-
-    def day_ahead_prices_extended(self, start: str, end: str) -> pd.Series:
-        """Try to get more recent data using different ENTSO-E methods"""
-    
-        # Method 1: Try imbalance prices (often more recent)
-        try:
-            imbalance = self.client.query_imbalance_prices(
-            self.area,
-            start=pd.Timestamp(start).tz_localize('Europe/Dublin'),
-            end=pd.Timestamp(end).tz_localize('Europe/Dublin')
-            )
-            if not imbalance.empty:
-                # Use imbalance prices as proxy for DAM
-                st.info("Using imbalance prices as proxy for recent dates")
-                return imbalance.mean(axis=1).rename("dam_eur_mwh")
-        except:
-            pass
-    
-        # Method 2: Fall back to regular DAM prices
-        return self.day_ahead_prices(start, end)
-
-    def day_ahead_prices(self, start: str, end: str) -> pd.Series:
-        """Fetch DAM prices with multiple fallback strategies"""
-        from datetime import timedelta
-        # Try different area codes that work for Ireland
-        area_codes = ["IE_SEM", "IE", "10YIE-1001A00010"]  # Different codes for Ireland
-        for area in area_codes:
-            try:
-                s = self.client.query_day_ahead_prices(area,
-                start=pd.Timestamp(start).tz_localize('Europe/Dublin'),
-                end=pd.Timestamp(end).tz_localize('Europe/Dublin'))
-                if s is not None and len(s) > 0:
-                    print(f"✓ Got DAM prices using area code: {area}")
-                    s.name = "dam_eur_mwh"
-                    return s
-            except Exception as e:
-                print(f"Area {area} failed: {str(e)[:50]}")
-                continue
-                
-        # If no area code worked, try stepping back dates
-        print("Trying with older dates...")
-        end_date = pd.Timestamp(end)
-
-        for days_back in [7, 14, 21, 30]:
-            new_end = end_date - timedelta(days=days_back)
-            new_start = pd.Timestamp(start)
-            
-            try:
-                s = self.client.query_day_ahead_prices(
-                    "IE",  # Use simple IE code
-                    start=new_start.tz_localize('Europe/Dublin'),
-                    end=new_end.tz_localize('Europe/Dublin')
-                )
-                if s is not None and len(s) > 0:
-                    print(f"✓ Got data from {new_start.date()} to {new_end.date()}")
-                    s.name = "dam_eur_mwh"
-                    return s
-                    
-            except:
-                continue
-                
-        print("No DAM prices found from ENTSO-E")
-        return pd.Series(dtype=float, name="dam_eur_mwh")
-
-    def fetch_ie_dam_prices(start_date, end_date):
-        token = os.environ["ENTSOE_TOKEN"]
-        client = EntsoePandasClient(api_key=token)
-        tz = pytz.timezone("Europe/Dublin")
-        start = tz.localize(pd.Timestamp(start_date))
-        end = tz.localize(pd.Timestamp(end_date)) + pd.Timedelta(days=1)
-        # Bidding zone for SEM/IE
-        series = client.query_day_ahead_prices('IE', start=start, end=end)
-        df = series.tz_convert('UTC').to_frame('dam_eur_mwh').reset_index().rename(columns={'index':'ts_utc'})
-        return df
-
-    def _try_pairs(self, func, pairs, **kwargs):
-        """Try several border code pairs until one works; return first Series/DataFrame."""
-        for a, b in pairs:
-            try:
-                return func(a, b, **kwargs)
-            except NoMatchingDataError:
-                continue
-            except Exception:
-                continue
-        # nothing worked
-        raise NoMatchingDataError
-
-    def net_imports(self, start: str, end: str) -> pd.Series:
-        """
-        Net imports into IE_SEM from GB. Positive = importing into IE.
-        """
-        # pairs to try (ENTSO-E codes vary by border)
-        pairs = [
-            ("GB", "IE_SEM"),
-            ("GB_GBN", "IE_SEM"),
-            ("GB_NIR", "IE_SEM"),
-        ]
-
-        # flow INTO IE (GB -> IE)
-        s_in = self._try_pairs(
-            self.client.query_crossborder_flows,
-            pairs=[(a, b) for a, b in pairs],
-            start=self._brussels(start),
-            end=self._brussels(end),
-        )
-        # flow OUT OF IE (IE -> GB)
-        s_out = self._try_pairs(
-            self.client.query_crossborder_flows,
-            pairs=[(b, a) for a, b in pairs],
-            start=self._brussels(start),
-            end=self._brussels(end),
-        )
-        s = s_in.rename("flow_in") - s_out.rename("flow_out")
-        s.name = "net_imports_mw"
-        return s
 
     def _brussels(self, dt_like) -> pd.Timestamp:
         ts = pd.Timestamp(dt_like)
@@ -175,52 +73,48 @@ class Entsoe:
             return ts.tz_localize(TZ_QUERY)
         return ts.tz_convert(TZ_QUERY)
 
+    def day_ahead_prices(self, start: str, end: str) -> pd.Series:
+        try:
+            s = self.client.query_day_ahead_prices(self.area,
+                                                   start=self._brussels(start),
+                                                   end=self._brussels(end))
+            if s is None or len(s) == 0:
+                return pd.Series(dtype=float, name="dam_eur_mwh")
+            s.name = "dam_eur_mwh"
+            return s
+        except Exception:
+            return pd.Series(dtype=float, name="dam_eur_mwh")
 
-    # --- Load forecast -> always return a Series named 'load_forecast_mw' ---
     def load_forecast(self, start: str, end: str) -> pd.Series:
-        df = self.client.query_load_and_forecast(self.area,start=self._brussels(start), end=self._brussels(end),)
-
+        df = self.client.query_load_and_forecast(self.area,
+                                                 start=self._brussels(start),
+                                                 end=self._brussels(end))
         def _norm(c):
-            # Handle both tuple-like and scalar labels safely
-            try:
-                return " ".join(map(str, c)).lower()
-            except TypeError:
-                return str(c).lower()
-
+            try: return " ".join(map(str, c)).lower()
+            except TypeError: return str(c).lower()
         cand = [c for c in df.columns if "forecast" in _norm(c)]
         col = cand[0] if cand else df.columns[-1]
         s = pd.to_numeric(df[col], errors="coerce")
         s.name = "load_forecast_mw"
         return s
 
-    # -------- Wind & Solar forecast (compose from PSR types) --------
     def wind_solar_forecast(self, start: str, end: str) -> pd.DataFrame:
-        """
-        Columns:
-          - solar_mw
-          - wind_onshore_mw
-          - wind_offshore_mw
-          - wind_total_mw
-        """
         def _try(psr: str) -> pd.Series:
             try:
-                s = self.client.query_wind_and_solar_forecast(
-                    self.area,
-                    start=self._brussels(start),
-                    end=self._brussels(end),
-                    psr_type=psr,    # B16=Solar, B19=Wind Onshore, B18=Wind Offshore
-                )
+                s = self.client.query_wind_and_solar_forecast(self.area,
+                          start=self._brussels(start), end=self._brussels(end),
+                          psr_type=psr)  # B16=Solar, B19=Wind On, B18=Wind Off
                 return s if s is not None else pd.Series(dtype=float)
             except NoMatchingDataError:
                 return pd.Series(dtype=float)
 
-        solar = _try("B16")
+        solar   = _try("B16")
         wind_on = _try("B19")
-        wind_off = _try("B18")
+        wind_off= _try("B18")
 
         df = pd.concat(
             {"solar_mw": solar, "wind_onshore_mw": wind_on, "wind_offshore_mw": wind_off},
-            axis=1,
+            axis=1
         ).sort_index()
 
         cols = [c for c in ["wind_onshore_mw", "wind_offshore_mw"] if c in df]
