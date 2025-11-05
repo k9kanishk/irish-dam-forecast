@@ -445,24 +445,39 @@ else:
 # === ADDITIONAL FEATURES ===
 
 with st.expander("🔍 Model Performance"):
-    # Simple backtest on last 7 days
-    recent_data = df.iloc[-24*7:] if len(df) > 24*7 else df
-    recent_y = y.iloc[-24*7:] if len(y) > 24*7 else y
-    
-    if len(recent_data) > 0 and len(recent_y) > 0:
-        try:
-            recent_pred = model.predict(recent_data)
-            
-            # Calculate metrics
-            from sklearn.metrics import mean_absolute_error, mean_squared_error
-            mae = mean_absolute_error(recent_y, recent_pred)
-            rmse = np.sqrt(mean_squared_error(recent_y, recent_pred))
-            
-            col1, col2 = st.columns(2)
-            col1.metric("MAE (7-day)", f"€{mae:.2f}/MWh")
-            col2.metric("RMSE (7-day)", f"€{rmse:.2f}/MWh")
-        except Exception as e:
-            st.info(f"Cannot calculate metrics: {e}")
+    # Ensure we're testing on truly held-out data
+    if len(df) > 24*14:  # At least 14 days of data
+        # Use last 7 days for testing, previous data for training
+        split_point = -24*7
+        
+        X_train = df.iloc[:split_point]
+        y_train = y.iloc[:split_point]
+        X_test = df.iloc[split_point:]
+        y_test = y.iloc[split_point:]
+        
+        # Retrain model on training data only
+        test_model = make_model()
+        test_model.fit(X_train, y_train)
+        
+        # Predict on test set
+        test_pred = test_model.predict(X_test)
+        
+        # Calculate realistic metrics
+        from sklearn.metrics import mean_absolute_error, mean_squared_error
+        mae = mean_absolute_error(y_test, test_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, test_pred))
+        
+        col1, col2 = st.columns(2)
+        col1.metric("MAE (7-day test)", f"€{mae:.2f}/MWh")
+        col2.metric("RMSE (7-day test)", f"€{rmse:.2f}/MWh")
+        
+        # Expected ranges for Irish market
+        if mae < 5:
+            st.warning("⚠️ MAE seems too low - check for data leakage")
+        elif mae > 30:
+            st.warning("⚠️ MAE seems high - model needs improvement")
+        else:
+            st.success(f"✅ MAE of €{mae:.2f}/MWh is reasonable for Irish DAM")
 
 # Add feature importance if possible
 with st.expander("📊 Feature Importance"):
