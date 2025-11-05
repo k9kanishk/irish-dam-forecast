@@ -17,7 +17,27 @@ class Entsoe:
             raise RuntimeError("ENTSOE_TOKEN not set")
         self.client = EntsoePandasClient(api_key=token, timeout=30, retry_count=2)
         self.area = area
+
+    def day_ahead_prices_extended(self, start: str, end: str) -> pd.Series:
+        """Try to get more recent data using different ENTSO-E methods"""
     
+        # Method 1: Try imbalance prices (often more recent)
+        try:
+            imbalance = self.client.query_imbalance_prices(
+            self.area,
+            start=pd.Timestamp(start).tz_localize('Europe/Dublin'),
+            end=pd.Timestamp(end).tz_localize('Europe/Dublin')
+            )
+            if not imbalance.empty:
+                # Use imbalance prices as proxy for DAM
+                st.info("Using imbalance prices as proxy for recent dates")
+                return imbalance.mean(axis=1).rename("dam_eur_mwh")
+        except:
+            pass
+    
+        # Method 2: Fall back to regular DAM prices
+        return self.day_ahead_prices(start, end)
+
     def day_ahead_prices(self, start: str, end: str) -> pd.Series:
         """Fetch DAM prices with multiple fallback strategies"""
         from datetime import timedelta
