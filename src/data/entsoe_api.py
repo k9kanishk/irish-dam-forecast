@@ -19,50 +19,47 @@ class Entsoe:
         self.area = area
     
     def day_ahead_prices(self, start: str, end: str) -> pd.Series:
-    """Fetch DAM prices with multiple fallback strategies"""
-    from datetime import timedelta
-    
-    # Try different area codes that work for Ireland
-    area_codes = ["IE_SEM", "IE", "10YIE-1001A00010"]  # Different codes for Ireland
-    
-    for area in area_codes:
-        try:
-            s = self.client.query_day_ahead_prices(
-                area,
+        """Fetch DAM prices with multiple fallback strategies"""
+        from datetime import timedelta
+        # Try different area codes that work for Ireland
+        area_codes = ["IE_SEM", "IE", "10YIE-1001A00010"]  # Different codes for Ireland
+        for area in area_codes:
+            try:
+                s = self.client.query_day_ahead_prices(area,
                 start=pd.Timestamp(start).tz_localize('Europe/Dublin'),
-                end=pd.Timestamp(end).tz_localize('Europe/Dublin')
-            )
-            if s is not None and len(s) > 0:
-                print(f"✓ Got DAM prices using area code: {area}")
-                s.name = "dam_eur_mwh"
-                return s
-        except Exception as e:
-            print(f"Area {area} failed: {str(e)[:50]}")
-            continue
-    
-    # If no area code worked, try stepping back dates
-    print("Trying with older dates...")
-    end_date = pd.Timestamp(end)
-    
-    for days_back in [7, 14, 21, 30]:
-        new_end = end_date - timedelta(days=days_back)
-        new_start = pd.Timestamp(start)
-        
-        try:
-            s = self.client.query_day_ahead_prices(
-                "IE",  # Use simple IE code
-                start=new_start.tz_localize('Europe/Dublin'),
-                end=new_end.tz_localize('Europe/Dublin')
-            )
-            if s is not None and len(s) > 0:
-                print(f"✓ Got data from {new_start.date()} to {new_end.date()}")
-                s.name = "dam_eur_mwh"
-                return s
-        except:
-            continue
-    
-    print("No DAM prices found from ENTSO-E")
-    return pd.Series(dtype=float, name="dam_eur_mwh")
+                end=pd.Timestamp(end).tz_localize('Europe/Dublin'))
+                if s is not None and len(s) > 0:
+                    print(f"✓ Got DAM prices using area code: {area}")
+                    s.name = "dam_eur_mwh"
+                    return s
+            except Exception as e:
+                print(f"Area {area} failed: {str(e)[:50]}")
+                continue
+                
+        # If no area code worked, try stepping back dates
+        print("Trying with older dates...")
+        end_date = pd.Timestamp(end)
+
+        for days_back in [7, 14, 21, 30]:
+            new_end = end_date - timedelta(days=days_back)
+            new_start = pd.Timestamp(start)
+            
+            try:
+                s = self.client.query_day_ahead_prices(
+                    "IE",  # Use simple IE code
+                    start=new_start.tz_localize('Europe/Dublin'),
+                    end=new_end.tz_localize('Europe/Dublin')
+                )
+                if s is not None and len(s) > 0:
+                    print(f"✓ Got data from {new_start.date()} to {new_end.date()}")
+                    s.name = "dam_eur_mwh"
+                    return s
+                    
+            except:
+                continue
+                
+        print("No DAM prices found from ENTSO-E")
+        return pd.Series(dtype=float, name="dam_eur_mwh")
 
     def fetch_ie_dam_prices(start_date, end_date):
         token = os.environ["ENTSOE_TOKEN"]
