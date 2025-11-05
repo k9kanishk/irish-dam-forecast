@@ -1,7 +1,14 @@
 # FINAL FIXED app.py - Replace your entire src/dashboard/app.py with this
+# --- path bootstrap: make `src/` importable when running as a script ---
+import os, sys
+_THIS_DIR = os.path.dirname(__file__)
+_SRC_DIR  = os.path.abspath(os.path.join(_THIS_DIR, ".."))   # -> .../src
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
-from src.data.semopx_api import fetch_dam_hrp_recent
-from src.data.entsoe_api import fetch_ie_dam_recent
+
+from data.semopx_api import fetch_dam_hrp_recent
+from data.entsoe_api import fetch_ie_dam_recent
 import os
 import sys
 import time
