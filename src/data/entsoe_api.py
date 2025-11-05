@@ -11,6 +11,39 @@ import pytz, os
 AREA_IE = "IE_SEM"                     # <- use IE (works across entsoe-py versions)
 TZ_QUERY = ZoneInfo("Europe/Brussels")  # entsoe-py expects Brussels tz
 
+def fetch_ie_dam_prices_entsoe(start_date: str, end_date: str, cache_dir: Path = Path("data/processed"), force_refresh: bool = False) -> pd.DataFrame:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fp = cache_dir / f"dam_ie_{start_date}_{end_date}.parquet"
+    if fp.exists() and not force_refresh:
+        df = pd.read_parquet(fp)
+        df.index = pd.DatetimeIndex(df.index, tz="UTC")
+        df["dam_eur_mwh"] = df["dam_eur_mwh"].astype(float)
+        return df
+            
+        token = os.getenv("ENTSOE_TOKEN")
+        if not token:
+            raise RuntimeError("ENTSOE_TOKEN not set.")
+        client = EntsoePandasClient(api_key=token)
+        tz = pytz.timezone("Europe/Dublin")
+        start = tz.localize(pd.Timestamp(start_date))
+        end   = tz.localize(pd.Timestamp(end_date)) + pd.Timedelta(days=1)
+
+        ser = client.query_day_ahead_prices("IE", start=start, end=end, timeout=60)
+        if ser is None or len(ser) == 0:
+            raise RuntimeError("ENTSO-E returned empty series for IE day-ahead prices.")
+        ser = ser.tz_convert("UTC")
+        df = ser.to_frame("dam_eur_mwh")
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+        df.to_parquet(fp)
+        return df
+
+def fetch_ie_dam_recent(days: int = 21, force_refresh: bool = True) -> pd.DataFrame:
+    tz = pytz.timezone("Europe/Dublin")
+    today = pd.Timestamp.now(tz).normalize()
+    start = (today - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+    end   = today.strftime("%Y-%m-%d")
+    return fetch_ie_dam_prices_entsoe(start, end, force_refresh=force_refresh)
+
 class Entsoe:
     def __init__(self, token: str | None = None, area: str = "IE"):  # Use IE not IE_SEM
         token = token or os.getenv("ENTSOE_TOKEN")
@@ -19,38 +52,7 @@ class Entsoe:
         self.client = EntsoePandasClient(api_key=token, timeout=30, retry_count=2)
         self.area = area
 
-    def fetch_ie_dam_prices_entsoe(start_date: str, end_date: str, cache_dir: Path = Path("data/processed"), force_refresh: bool = False) -> pd.DataFrame:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        fp = cache_dir / f"dam_ie_{start_date}_{end_date}.parquet"
-        if fp.exists() and not force_refresh:
-            df = pd.read_parquet(fp)
-            df.index = pd.DatetimeIndex(df.index, tz="UTC")
-            df["dam_eur_mwh"] = df["dam_eur_mwh"].astype(float)
-            return df
-            
-            token = os.getenv("ENTSOE_TOKEN")
-            if not token:
-                raise RuntimeError("ENTSOE_TOKEN not set.")
-            client = EntsoePandasClient(api_key=token)
-            tz = pytz.timezone("Europe/Dublin")
-            start = tz.localize(pd.Timestamp(start_date))
-            end   = tz.localize(pd.Timestamp(end_date)) + pd.Timedelta(days=1)
-
-            ser = client.query_day_ahead_prices("IE", start=start, end=end, timeout=60)
-            if ser is None or len(ser) == 0:
-                raise RuntimeError("ENTSO-E returned empty series for IE day-ahead prices.")
-            ser = ser.tz_convert("UTC")
-            df = ser.to_frame("dam_eur_mwh")
-            df = df[~df.index.duplicated(keep="last")].sort_index()
-            df.to_parquet(fp)
-            return df
-
-    def fetch_ie_dam_recent(days: int = 21, force_refresh: bool = True) -> pd.DataFrame:
-        tz = pytz.timezone("Europe/Dublin")
-        today = pd.Timestamp.now(tz).normalize()
-        start = (today - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
-        end   = today.strftime("%Y-%m-%d")
-        return fetch_ie_dam_prices_entsoe(start, end, force_refresh=force_refresh)
+    
 
     def day_ahead_prices_extended(self, start: str, end: str) -> pd.Series:
         """Try to get more recent data using different ENTSO-E methods"""
