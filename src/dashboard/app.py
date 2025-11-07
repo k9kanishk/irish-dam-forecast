@@ -21,6 +21,11 @@ from dotenv import load_dotenv
 import numpy as np
 import requests
 
+# Sidebar toggles
+FAST_MODE = st.sidebar.checkbox("⚡ Fast mode (use cache, skip SEMOpx if slow)", value=True)
+DAYS = st.sidebar.slider("History window (days)", 7, 60, 21)
+
+
 # Fix path for imports
 APP_FILE = Path(__file__).resolve()
 REPO_ROOT = APP_FILE.parents[2]  
@@ -139,20 +144,24 @@ def ensure_dataset():
     
     st.info("Fetching DAM prices (SEMOpx HRP via reports API)...")
     try:
-        dam_df = fetch_dam_hrp_recent(days=28)
+        if FAST_MODE:
+            # Skip HRP (SEMOpx) in fast mode to avoid the extra network hop
+            raise RuntimeError("Skip SEMOpx in fast mode")
+        dam_df = fetch_dam_hrp_recent(days=DAYS)
         if dam_df is None or dam_df.empty:
             raise RuntimeError("SEMOpx returned empty HRP frame.")
         st.success(f"DAM (HRP) loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()} ({len(dam_df)} rows)")
     except Exception as e:
-        st.warning(f"SEMOpx HRP failed ({e}); falling back to ENTSO-E")
-        try:
-            entsoe_df = fetch_ie_dam_recent(days=28, force_refresh=True)
-            if isinstance(entsoe_df, pd.Series):
-                entsoe_df = entsoe_df.to_frame("dam_eur_mwh")
-            if entsoe_df is None or entsoe_df.empty:
-                raise RuntimeError("ENTSO-E returned empty data.")
-            entsoe_df.index = pd.DatetimeIndex(entsoe_df.index, tz="UTC")
-            dam_df = entsoe_df.rename_axis("ts_utc").reset_index()
+        st.info(f"Using ENTSO-E (reason: {e})")
+        # Do NOT force refresh unless user disabled fast mode
+        entsoe_df = fetch_ie_dam_recent(days=DAYS, force_refresh=not FAST_MODE)
+        if isinstance(entsoe_df, pd.Series):
+            entsoe_df = entsoe_df.to_frame("dam_eur_mwh")
+        if entsoe_df is None or entsoe_df.empty:
+            st.error("ENTSO-E returned no data.")
+            st.stop()
+        entsoe_df.index = pd.DatetimeIndex(entsoe_df.index, tz="UTC")
+        dam_df = entsoe_df.rename_axis("ts_utc").reset_index()
             st.success(f"ENTSO-E DAM loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()}")
         except Exception as e2:
             st.error(f"Could not load DAM from either source: {e2}")
