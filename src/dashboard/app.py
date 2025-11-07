@@ -8,7 +8,7 @@ if _SRC_DIR not in sys.path:
 
 
 from data.semopx_api import fetch_dam_hrp_recent
-from data.entsoe_api import fetch_ie_dam_recent
+from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked
 import os
 import sys
 import time
