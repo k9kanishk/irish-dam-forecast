@@ -28,6 +28,7 @@ from entsoe.exceptions import NoMatchingDataError
 from data.weather import fetch_hourly
 from features.build_features import build_feature_table
 from features.targets import make_day_ahead_target
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 # -------------------- Page / Sidebar --------------------
 st.set_page_config(
@@ -169,11 +170,47 @@ def ensure_dataset():
 
         # -------- DAM prices (cached wrappers) --------
         st.write("🔹 Fetching DAM prices…")
+        dam_df = None
+
+        def _get_dam():
+            # call the cached wrapper; it may still do network I/O
+            return build_dam_cached(FAST_MODE, DAYS)  # ['ts_utc','dam_eur_mwh']
+            
         try:
-            dam_df = build_dam_cached(FAST_MODE, DAYS)  # ['ts_utc','dam_eur_mwh']
+            # use 80% of the total budget for DAM; the rest is for fundamentals/features
+            dam_timeout = max(5, int(TIME_BUDGET * 0.8))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(_get_dam)
+                dam_df = fut.result(timeout=dam_timeout)
+
+        except FuturesTimeout:
+            st.write("⏳ DAM fetch exceeded time budget.")
+            # If we have a previous dataset on disk, use it and stop the build early.
+            if DATA_PATH.exists():
+                st.write("↩️ Using last saved dataset instead.")
+                status.update(label="Done (fallback to cached file)", state="complete")
+                return
+            # No cached file: fall back to a tiny, synthetic dataset so UI stays responsive.
+            # (This keeps the app usable; you can rebuild later with a larger budget.)
+            st.write("🛟 No cached file. Creating minimal synthetic dataset.")
+            end_local = pd.Timestamp.now(tz="Europe/Dublin").floor("H")
+            idx = pd.date_range(end=end_local, periods=DAYS * 24, freq="H")
+            base = 80 + 10 * np.sin(2 * np.pi * (idx.hour / 24.0))  # simple diurnal curve
+            dam_series = pd.Series(base, index=idx, name="dam_eur_mwh")   
+
+            # Minimal features + target
+            X_min = pd.DataFrame({ "hour": idx.hour, "dow": idx.dayofweek, "month": idx.month,"is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),"dam_eur_mwh": dam_series.values}, index=idx)
+            y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
+
+            out = X_min.copy()
+            out["target"] = y_min
+            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(DATA_PATH)
+            status.update(label="Done (minimal synthetic)", state="complete")
+            return   
+
         except Exception as e:
             st.write(f"⚠️ DAM fetch failed: {e}")
-            # last resort: use previous dataset (if any)
             if DATA_PATH.exists():
                 st.write("↩️ Falling back to last saved dataset.")
                 status.update(label="Done (fallback to cached file)", state="complete")
@@ -181,6 +218,13 @@ def ensure_dataset():
             st.error("No DAM data available and no cached file to fall back to.")
             st.stop()
 
+
+
+
+
+
+
+        
         dam_df["ts_utc"] = pd.to_datetime(dam_df["ts_utc"], utc=True)
         dam_df = dam_df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
 
