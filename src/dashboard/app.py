@@ -37,6 +37,9 @@ st.set_page_config(
 # Sidebar toggles
 FAST_MODE = st.sidebar.checkbox("⚡ Fast mode (use cache, skip SEMOpx if slow)", value=True)
 DAYS = st.sidebar.slider("History window (days)", 7, 60, 21)
+# Add a hard time budget for the build to keep the UI responsive
+TIME_BUDGET = st.sidebar.slider("Build time budget (sec)", 15, 180, 45)
+
 
 # -------------------- Caching wrappers --------------------
 @st.cache_data(ttl=60*30, show_spinner=False)
@@ -137,116 +140,175 @@ class EirGridBackup:
 # -------------------- Dataset build --------------------
 DATA_PATH = Path("data/processed/train.parquet")
 
-@st.cache_data(show_spinner=True, ttl=3600)
 def ensure_dataset():
-    """Build the training dataset with robust error handling."""
-    # Quick freshness check
-    if DATA_PATH.exists():
-        mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
-        if datetime.now() - mod_time < timedelta(hours=6):
-            return  # Use cached file
+    """Build the training dataset with robust progress + time budget."""
+    t0 = time.perf_counter()
 
-    # Load config (lat/lon for weather)
-    try:
-        with open("config.yaml", "r") as f:
-            cfg = yaml.safe_load(f) or {}
-    except Exception:
-        cfg = {}
-    lat = cfg.get("weather", {}).get("lat", 53.4)
-    lon = cfg.get("weather", {}).get("lon", -8.2)
+    def over_budget() -> bool:
+        return (time.perf_counter() - t0) > TIME_BUDGET
 
-    # ---- DAM prices (cached + robust fallback) ----
-    st.info("Fetching DAM prices…")
-    dam_df = build_dam_cached(FAST_MODE, DAYS)  # ['ts_utc','dam_eur_mwh']
-    dam_df["ts_utc"] = pd.to_datetime(dam_df["ts_utc"], utc=True)
-    dam_df = dam_df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
+    with st.status("Building dataset…", expanded=True) as status:
+        # Quick freshness: re-use file if <6h old
+        if DATA_PATH.exists():
+            mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
+            if datetime.now() - mod_time < timedelta(hours=6):
+                st.write("✅ Using cached dataset on disk (fresh < 6h).")
+                status.update(label="Done", state="complete")
+                return
 
-    # Date window for fundamentals/forecast (use the DAM range in Dublin time)
-    min_dt_local = dam_df["ts_utc"].min().tz_convert("Europe/Dublin")
-    max_dt_local = dam_df["ts_utc"].max().tz_convert("Europe/Dublin")
-    start_local = (min_dt_local).normalize()
-    end_local   = (max_dt_local).normalize()
+        # Load config (lat/lon for weather)
+        try:
+            with open("config.yaml", "r") as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception:
+            cfg = {}
+        lat = cfg.get("weather", {}).get("lat", 53.4)
+        lon = cfg.get("weather", {}).get("lon", -8.2)
 
-    st.caption(f"Window for fundamentals: {start_local.date()} → {end_local.date()}")
+        # -------- DAM prices (cached wrappers) --------
+        st.write("🔹 Fetching DAM prices…")
+        try:
+            dam_df = build_dam_cached(FAST_MODE, DAYS)  # ['ts_utc','dam_eur_mwh']
+        except Exception as e:
+            st.write(f"⚠️ DAM fetch failed: {e}")
+            # last resort: use previous dataset (if any)
+            if DATA_PATH.exists():
+                st.write("↩️ Falling back to last saved dataset.")
+                status.update(label="Done (fallback to cached file)", state="complete")
+                return
+            st.error("No DAM data available and no cached file to fall back to.")
+            st.stop()
 
-    # ---- Fundamentals (cached) ----
-    funds = build_fundamentals_cached(start_local, end_local, lat, lon)
-    load_fc = funds["load_fc"]
-    ws_fc   = funds["ws_fc"]
-    weather = funds["weather"]
+        dam_df["ts_utc"] = pd.to_datetime(dam_df["ts_utc"], utc=True)
+        dam_df = dam_df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
 
-    # ---- Convert DAM to Series aligned with rest (Dublin tz-naive) ----
-    dam_series = dam_df.set_index("ts_utc")["dam_eur_mwh"]
-    # Convert to Europe/Dublin, then make tz-naive for feature builder
-    dam_series = dam_series.tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
+        # Prepare DAM series in Dublin tz-naive (what your feature builder expects)
+        dam_series = dam_df.set_index("ts_utc")["dam_eur_mwh"].tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
 
-    def _to_dublin_naive(x):
-        if isinstance(x, pd.Series):
+        # If we’re already over budget, write a minimal dataset and exit
+        if over_budget():
+            st.write("⏳ Time budget reached after DAM — writing minimal dataset.")
+            idx = dam_series.index
+            X_min = pd.DataFrame({
+                "hour": idx.hour,
+                "dow": idx.dayofweek,
+                "month": idx.month,
+                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
+                "dam_eur_mwh": dam_series.values
+            }, index=idx)
+            y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
+
+            out = X_min.copy()
+            out["target"] = y_min
+            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(DATA_PATH)
+            status.update(label="Done (minimal features)", state="complete")
+            return
+
+        # -------- Fundamentals window from DAM range --------
+        min_dt_local = dam_df["ts_utc"].min().tz_convert("Europe/Dublin")
+        max_dt_local = dam_df["ts_utc"].max().tz_convert("Europe/Dublin")
+        start_local = min_dt_local.normalize()
+        end_local   = max_dt_local.normalize()
+
+        st.write(f"🔹 Fundamentals window: {start_local.date()} → {end_local.date()}")
+
+        # -------- Fundamentals (cached) --------
+        st.write("🔹 Fetching load/wind/solar/weather…")
+        funds = build_fundamentals_cached(start_local, end_local, lat, lon)
+        load_fc = funds["load_fc"]
+        ws_fc   = funds["ws_fc"]
+        weather = funds["weather"]
+
+        # Convert to Dublin tz-naive to align with your feature builder
+        def _to_dublin_naive(x):
+            if not hasattr(x, "index"):
+                return x
             idx = x.index
-        else:
-            idx = x.index if hasattr(x, "index") else None
-        if idx is None:
+            if getattr(idx, "tz", None) is not None:
+                idx = idx.tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
+            else:
+                idx = idx.tz_localize(ZoneInfo("UTC")).tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
+            x.index = idx
             return x
-        # localize/convert
-        if getattr(idx, "tz", None) is not None:
-            idx = idx.tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
-        else:
-            # assume UTC if naive
-            idx = idx.tz_localize(ZoneInfo("UTC")).tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
-        x.index = idx
-        return x
 
-    load_fc = _to_dublin_naive(load_fc)
-    ws_fc   = _to_dublin_naive(ws_fc)
-    weather = _to_dublin_naive(weather)
+        load_fc = _to_dublin_naive(load_fc)
+        ws_fc   = _to_dublin_naive(ws_fc)
+        weather = _to_dublin_naive(weather)
 
-    # Remove duplicates (safety)
-    dam_series = dam_series[~dam_series.index.duplicated(keep="last")]
-    if isinstance(load_fc, pd.Series):
-        load_fc = load_fc[~load_fc.index.duplicated(keep="last")]
-    if isinstance(ws_fc, pd.DataFrame):
-        ws_fc = ws_fc[~ws_fc.index.duplicated(keep="last")]
-    if isinstance(weather, pd.DataFrame):
-        weather = weather[~weather.index.duplicated(keep="last")]
+        # Deduplicate indices
+        dam_series = dam_series[~dam_series.index.duplicated(keep="last")]
+        if hasattr(load_fc, "index"):
+            load_fc = load_fc[~load_fc.index.duplicated(keep="last")]
+        if hasattr(ws_fc, "index"):
+            ws_fc = ws_fc[~ws_fc.index.duplicated(keep="last")]
+        if hasattr(weather, "index"):
+            weather = weather[~weather.index.duplicated(keep="last")]
 
-    # ---- Build features/target (cached) ----
-    st.caption("Building features…")
-    try:
-        X, y = build_features_cached(dam_series, load_fc, ws_fc, weather)
-        # Safety: ensure key raw columns exist if your feature builder omitted them
-        if "dam_eur_mwh" not in X.columns:
-            X["dam_eur_mwh"] = dam_series.reindex(X.index)
-        if "load_forecast_mw" not in X.columns and isinstance(load_fc, pd.Series):
-            X["load_forecast_mw"] = load_fc.reindex(X.index)
-    except Exception as e:
-        st.error(f"Feature building failed: {e}")
-        st.stop()
+        # If over budget here, fall back to minimal features
+        if over_budget():
+            st.write("⏳ Time budget reached during fundamentals — writing minimal dataset.")
+            idx = dam_series.index
+            X_min = pd.DataFrame({
+                "hour": idx.hour,
+                "dow": idx.dayofweek,
+                "month": idx.month,
+                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
+                "dam_eur_mwh": dam_series.values
+            }, index=idx)
+            y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
 
-    # ---- Filter valid rows ----
-    valid = y.notna()
-    if "dam_eur_mwh" in X.columns:
-        valid &= X["dam_eur_mwh"].notna()
-    if "load_forecast_mw" in X.columns:
-        valid &= X["load_forecast_mw"].notna()
+            out = X_min.copy()
+            out["target"] = y_min
+            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(DATA_PATH)
+            status.update(label="Done (minimal features)", state="complete")
+            return
 
-    X = X[valid]
-    y = y[valid]
+        # -------- Build features / target --------
+        st.write("🔹 Building features…")
+        try:
+            X, y = build_features_cached(dam_series, load_fc, ws_fc, weather)
+            if "dam_eur_mwh" not in X.columns:
+                X["dam_eur_mwh"] = dam_series.reindex(X.index)
+            if "load_forecast_mw" not in X.columns and hasattr(load_fc, "reindex"):
+                X["load_forecast_mw"] = load_fc.reindex(X.index)
+        except Exception as e:
+            st.write(f"⚠️ Feature build failed: {e} — falling back to minimal features.")
+            idx = dam_series.index
+            X = pd.DataFrame({
+                "hour": idx.hour,
+                "dow": idx.dayofweek,
+                "month": idx.month,
+                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
+                "dam_eur_mwh": dam_series.values
+            }, index=idx)
+            y = make_day_ahead_target(dam_series).reindex(X.index)
 
-    if X.empty:
-        st.error("No valid training rows after processing.")
-        st.stop()
+        # Filter valid rows
+        valid = y.notna()
+        if "dam_eur_mwh" in X.columns:
+            valid &= X["dam_eur_mwh"].notna()
+        if "load_forecast_mw" in X.columns:
+            valid &= X["load_forecast_mw"].notna()
+        X = X[valid]
+        y = y[valid]
+        if X.empty:
+            st.error("No valid rows after processing.")
+            st.stop()
 
-    # ---- Impute remaining gaps ----
-    X = X.fillna(method="ffill", limit=24).fillna(method="bfill", limit=24).fillna(0)
+        # Impute small gaps
+        X = X.fillna(method="ffill", limit=24).fillna(method="bfill", limit=24).fillna(0)
 
-    # ---- Persist dataset ----
-    out = X.copy()
-    out["target"] = y
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    out.to_parquet(DATA_PATH)
+        # Save dataset
+        out = X.copy()
+        out["target"] = y
+        DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        out.to_parquet(DATA_PATH)
 
-    st.success(f"✅ Dataset built: {len(out):,} rows "
-               f"from {out.index.min().date()} to {out.index.max().date()}")
+        status.update(label=f"Done — {len(out):,} rows saved", state="complete")
+
+
 
 # -------------------- Sidebar: Data management --------------------
 with st.sidebar:
