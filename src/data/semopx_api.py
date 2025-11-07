@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
+import streamlit as st
 
 # From your DevTools/cURL (works as-is)
 SEMO_DOC_ID_HRP = "69074b479620d95ac3217943"
@@ -17,6 +18,12 @@ SEMO_HEADERS = {
     "referer": "https://www.semopx.com/",
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
 }
+
+@st.cache_resource
+def http_session():
+    s = requests.Session()
+    s.headers.update(SEMO_HEADERS)
+    return s
 
 def _sleep(attempt: int, base: float = 0.6, cap: float = 6.0):
     time.sleep(min(cap, base * (2 ** (attempt - 1)) + random.uniform(0, 0.3)))
