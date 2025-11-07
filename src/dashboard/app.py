@@ -22,7 +22,7 @@ import numpy as np
 import requests
 from datetime import timedelta
 from data.semopx_api import fetch_dam_hrp_recent
-from data.entsoe_api import fetch_ie_dam_recent   # fallback
+from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked
 from data.entsoe_api import Entsoe
 from data.weather import fetch_hourly
 from features.build_features import build_feature_table
