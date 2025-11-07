@@ -163,9 +163,9 @@ def ensure_dataset():
         entsoe_df.index = pd.DatetimeIndex(entsoe_df.index, tz="UTC")
         dam_df = entsoe_df.rename_axis("ts_utc").reset_index()
         st.success(f"ENTSO-E DAM loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()}")
-        except Exception as e2:
-            st.error(f"Could not load DAM from either source: {e2}")
-            st.stop() 
+    except Exception as e2:
+        st.error(f"Could not load DAM from either source: {e2}")
+        st.stop() 
 
     dam_df["ts_utc"] = pd.to_datetime(dam_df["ts_utc"], utc=True)
     dam_df = dam_df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
