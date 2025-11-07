@@ -20,10 +20,86 @@ import streamlit as st
 from dotenv import load_dotenv
 import numpy as np
 import requests
+from datetime import timedelta
+from data.semopx_api import fetch_dam_hrp_recent
+from data.entsoe_api import fetch_ie_dam_recent   # fallback
+from data.entsoe_api import Entsoe
+from data.weather import fetch_hourly
+from features.build_features import build_feature_table
+from features.targets import make_day_ahead_target
 
-# Sidebar toggles
+# Sidebar toggles (if not already present)
 FAST_MODE = st.sidebar.checkbox("⚡ Fast mode (use cache, skip SEMOpx if slow)", value=True)
 DAYS = st.sidebar.slider("History window (days)", 7, 60, 21)
+
+@st.cache_data(ttl=60*30, show_spinner=False)
+def build_dam_cached(fast_mode: bool, days: int) -> pd.DataFrame:
+    """
+    Return a tidy DAM dataframe with columns ['ts_utc','dam_eur_mwh'].
+    Uses SEMOpx HRP unless fast_mode is True or HRP fails, then ENTSO-E.
+    """
+    try:
+        if fast_mode:
+            raise RuntimeError("fast-mode: skip SEMOpx")
+        df = fetch_dam_hrp_recent(days=days)
+        if df is None or df.empty:
+            raise RuntimeError("SEMOpx HRP empty")
+        # already ['ts_utc','dam_eur_mwh']
+        return df
+    except Exception as e:
+        # Fallback to ENTSO-E (no force refresh in fast mode)
+        entsoe_df = fetch_ie_dam_recent(days=days, force_refresh=not fast_mode)
+        if isinstance(entsoe_df, pd.Series):
+            entsoe_df = entsoe_df.to_frame("dam_eur_mwh")
+        entsoe_df.index = pd.DatetimeIndex(entsoe_df.index, tz="UTC")
+        return entsoe_df.rename_axis("ts_utc").reset_index()
+
+@st.cache_data(ttl=60*30, show_spinner=False)
+def build_fundamentals_cached(days: int, fast_mode: bool):
+    """
+    Pull load forecast, wind/solar forecast, and weather; return as a dict.
+    Cached so we don’t refetch on every UI change.
+    """
+    e = Entsoe()  # uses ENTSOE_TOKEN
+    # Compute date window in local time; functions accept strings or Timestamps
+    end_local = pd.Timestamp.now(tz="Europe/Dublin").normalize()
+    start_local = end_local - pd.Timedelta(days=days)
+
+    load_fc = e.load_forecast(start_local, end_local)           # Series (tz-aware)
+    ws_fc   = e.wind_solar_forecast(start_local, end_local)     # DataFrame
+    weather = fetch_hourly(start_local, end_local)               # DataFrame (your existing fn)
+
+    return {"load_fc": load_fc, "ws_fc": ws_fc, "weather": weather}
+
+@st.cache_data(ttl=60*30, show_spinner=False)
+def build_features_cached(dam_df: pd.DataFrame, load_fc, ws_fc, weather):
+    """
+    Build X and y once and cache the result.
+    """
+    # y from DAM
+    y = make_day_ahead_target(dam_df)  # your existing function (returns Series)
+    # X from fundamentals + calendar etc.
+    X = build_feature_table(dam_df, load_fc, ws_fc, weather)
+    return X, y
+
+from xgboost import XGBRegressor
+
+@st.cache_resource
+def fit_model_cached(X: pd.DataFrame, y: pd.Series, params: dict | None = None):
+    """
+    Train once per unique (X,y,params) state and reuse the fitted model.
+    Use cache_resource for non-serializable objects like sklearn/xgb models.
+    """
+    if params is None:
+        params = dict(
+            n_estimators=800, max_depth=6, learning_rate=0.04,
+            subsample=0.8, colsample_bytree=0.8, reg_lambda=5.0,
+            tree_method="hist", objective="reg:squarederror"
+        )
+    model = XGBRegressor(**params)
+    model.fit(X, y)
+    return model
+
 
 
 # Fix path for imports
