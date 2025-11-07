@@ -154,7 +154,7 @@ def ensure_dataset():
     except Exception as e:
         st.info(f"Using ENTSO-E (reason: {e})")
         # Do NOT force refresh unless user disabled fast mode
-        entsoe_df = fetch_ie_dam_recent(days=DAYS, force_refresh=not FAST_MODE)
+        entsoe_df = fetch_ie_dam_chunked(days=DAYS, chunk_days=7, force_refresh=not FAST_MODE)
         if isinstance(entsoe_df, pd.Series):
             entsoe_df = entsoe_df.to_frame("dam_eur_mwh")
         if entsoe_df is None or entsoe_df.empty:
