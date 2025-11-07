@@ -7,8 +7,34 @@ import pytz
 from zoneinfo import ZoneInfo
 from entsoe import EntsoePandasClient
 from entsoe.exceptions import NoMatchingDataError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 TZ_QUERY = ZoneInfo("Europe/Brussels")
+
+def fetch_ie_dam_chunked(days: int = 21, chunk_days: int = 7, force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Fetch last `days` in chunks (7d by default). Faster + fewer timeouts.
+    """
+    tz = pytz.timezone("Europe/Dublin")
+    end_local = pd.Timestamp.now(tz).normalize()
+    start_local = end_local - pd.Timedelta(days=days)
+
+    # Build chunk windows
+    windows = []
+    cur = start_local
+    while cur < end_local:
+        nxt = min(cur + pd.Timedelta(days=chunk_days), end_local)
+        windows.append((cur.strftime("%Y-%m-%d"), nxt.strftime("%Y-%m-%d")))
+        cur = nxt
+
+    parts = []
+    # sequential is safest; if you want parallel, set max_workers=2
+    for s, e in windows:
+        parts.append(fetch_ie_dam_prices_entsoe(s, e, force_refresh=force_refresh))
+
+    df = pd.concat(parts).sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df
 
 def fetch_ie_dam_prices_entsoe(
     start_date: str,
