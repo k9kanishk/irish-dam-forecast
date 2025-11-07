@@ -64,7 +64,12 @@ def fetch_ie_dam_prices_entsoe(
     start = tz.localize(pd.Timestamp(start_date))
     end   = tz.localize(pd.Timestamp(end_date)) + pd.Timedelta(days=1)  # end exclusive
 
-    ser = client.query_day_ahead_prices("IE", start=start, end=end, timeout=60)
+    # Some entsoe-py versions don't accept 'timeout'. Try it; if TypeError, call without.
+    try:
+        ser = client.query_day_ahead_prices("IE", start=start, end=end, timeout=60)
+    except TypeError:
+        ser = client.query_day_ahead_prices("IE", start=start, end=end)
+
     if ser is None or len(ser) == 0:
         raise RuntimeError("ENTSO-E returned empty series for IE day-ahead prices.")
 
