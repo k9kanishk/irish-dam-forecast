@@ -162,7 +162,7 @@ def ensure_dataset():
             st.stop()
         entsoe_df.index = pd.DatetimeIndex(entsoe_df.index, tz="UTC")
         dam_df = entsoe_df.rename_axis("ts_utc").reset_index()
-            st.success(f"ENTSO-E DAM loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()}")
+        st.success(f"ENTSO-E DAM loaded: {dam_df['ts_utc'].min()} → {dam_df['ts_utc'].max()}")
         except Exception as e2:
             st.error(f"Could not load DAM from either source: {e2}")
             st.stop() 
