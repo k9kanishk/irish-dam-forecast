@@ -112,12 +112,12 @@ def fetch_ie_dam_chunked(
             df_part = fetch_ie_dam_prices_entsoe(s, e, force_refresh=force_refresh)
             if df_part is not None and not df_part.empty:
                 parts.append(df_part)
-        except NoMatchingDataError:
-            # Just skip this chunk; we'll try others
+        except NoMatchingDataError as e:
+            print(f"[ENTSOE] No data for chunk {s}->{e}: {e}")
             continue
-        except Exception:
-            # Network or other error — skip this chunk too
-            continue
+        except Exception as e:
+            # TEMP: see what’s actually going wrong
+            raise RuntimeError(f"[ENTSOE] Error for chunk {s}->{e}: {e}") from e
 
     if not parts:
         if fallback_semopx and _fetch_semopx_recent is not None:
