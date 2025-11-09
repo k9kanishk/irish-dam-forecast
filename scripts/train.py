@@ -11,6 +11,5 @@ if __name__ == '__main__':
 
     print('Ridge:')
     print(rolling_origin_cv(df, y, ridge_factory, n_splits=12))
-    print('
-XGBoost:')
+    print('XGBoost:')
     print(rolling_origin_cv(df, y, xgb_factory, n_splits=12))
