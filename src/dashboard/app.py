@@ -22,7 +22,7 @@ import yaml
 import requests
 
 # ---- Project imports (use 'data.*' / 'features.*' with our path bootstrap)
-from data.semopx_api import fetch_dam_hrp_recent
+# from data.semopx_api import fetch_dam_hrp_recent
 from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked, Entsoe
 from entsoe.exceptions import NoMatchingDataError
 from data.weather import fetch_hourly
@@ -48,30 +48,21 @@ TIME_BUDGET = st.sidebar.slider("Build time budget (sec)", 15, 180, 45)
 @st.cache_data(ttl=60*30, show_spinner=False)
 def build_dam_cached(fast_mode: bool, days: int) -> pd.DataFrame:
     """
-    Return a tidy DAM dataframe with columns ['ts_utc','dam_eur_mwh'].
-    Prefer SEMOpx HRP unless fast_mode is True or HRP fails; fallback to ENTSO-E chunked (delay_days=3).
+    Fetch Irish DAM prices from ENTSO-E only.
     """
-    try:
-        if fast_mode:
-            raise RuntimeError("fast-mode: skip SEMOpx")
-        df = fetch_dam_hrp_recent(days=days)
-        if df is None or df.empty:
-            raise RuntimeError("SEMOpx HRP empty")
-        # already ['ts_utc','dam_eur_mwh']
-        return df
-    except Exception as e:
-        # Fallback to ENTSO-E (do NOT force refresh in fast mode)
-        try:
-            entsoe_df = fetch_ie_dam_chunked(days=days, chunk_days=7, force_refresh=not fast_mode, delay_days=3)
-        except NoMatchingDataError as e2:
-            # As an extra fallback, try recent (which also uses delay_days internally)
-            entsoe_df = fetch_ie_dam_recent(days=days, force_refresh=not fast_mode, delay_days=3)
-        if isinstance(entsoe_df, pd.Series):
-            entsoe_df = entsoe_df.to_frame("dam_eur_mwh")
-        if entsoe_df is None or entsoe_df.empty:
-            raise RuntimeError("ENTSO-E returned no data.")
-        entsoe_df.index = pd.DatetimeIndex(entsoe_df.index, tz="UTC")
-        return entsoe_df.rename_axis("ts_utc").reset_index()
+    entsoe_df = fetch_ie_dam_chunked(
+        days=days,
+        chunk_days=7,
+        force_refresh=not fast_mode,
+        delay_days=3,
+        fallback_semopx=False,   # 🔴 disable SEMOpx fallback
+    )
+    if isinstance(entsoe_df, pd.Series):
+        entsoe_df = entsoe_df.to_frame("dam_eur_mwh")
+
+    entsoe_df.index = pd.DatetimeIndex(entsoe_df.index, tz="UTC")
+    return entsoe_df.rename_axis("ts_utc").reset_index()
+
 
 @st.cache_data(ttl=60*30, show_spinner=False)
 def build_fundamentals_cached(start_local: pd.Timestamp, end_local: pd.Timestamp, lat: float, lon: float):
