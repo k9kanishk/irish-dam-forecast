@@ -42,7 +42,6 @@ st.set_page_config(
 # FAST_MODE = st.sidebar.checkbox("⚡ Fast mode (use cache, skip SEMOpx if slow)", value=True)
 DAYS = 21
 TIME_BUDGET = 63
-st.sidebar.info("Using synthetic demo data (no live market prices).")
 
 
 # -------------------- Caching wrappers --------------------
