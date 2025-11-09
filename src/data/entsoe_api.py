@@ -85,8 +85,9 @@ def fetch_ie_dam_chunked(
     chunk_days: int = 7,
     force_refresh: bool = False,
     delay_days: int = 3,
-    fallback_semopx: bool = True,
+    fallback_semopx: bool = False,   # default False now
 ) -> pd.DataFrame:
+
     """
     Fetch last `days` of prices using multiple small windows.
     - `delay_days` skips very recent days ENTSO-E might not have yet.
