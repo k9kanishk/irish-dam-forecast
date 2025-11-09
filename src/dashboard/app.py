@@ -206,8 +206,30 @@ def ensure_dataset():
                 st.write("↩️ Falling back to last saved dataset.")
                 status.update(label="Done (fallback to cached file)", state="complete")
                 return
-            st.error("No DAM data available and no cached file to fall back to.")
-            st.stop()
+
+            # 🛟 No cached file -> synthetic minimal dataset so UI still works
+            st.write("🛟 No DAM data and no cache. Creating minimal synthetic dataset.")
+            end_local = pd.Timestamp.now(tz="Europe/Dublin").floor("H")
+            idx = pd.date_range(end=end_local, periods=DAYS * 24, freq="H")
+            base = 80 + 10 * np.sin(2 * np.pi * (idx.hour / 24.0))
+            dam_series = pd.Series(base, index=idx, name="dam_eur_mwh")
+
+            X_min = pd.DataFrame({
+                "hour": idx.hour,
+                "dow": idx.dayofweek,
+                "month": idx.month,
+                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
+                "dam_eur_mwh": dam_series.values
+            }, index=idx)
+            y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
+
+            out = X_min.copy()
+            out["target"] = y_min
+            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(DATA_PATH)
+            status.update(label="Done (minimal synthetic)", state="complete")
+            return
+
 
 
 
