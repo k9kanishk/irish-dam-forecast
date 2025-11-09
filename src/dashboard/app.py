@@ -136,6 +136,7 @@ class EirGridBackup:
             return False
 
 # -------------------- Dataset build --------------------
+# -------------------- Dataset build --------------------
 DATA_PATH = Path("data/processed/train.parquet")
 
 def ensure_dataset():
@@ -194,8 +195,19 @@ def ensure_dataset():
             dam_series = pd.Series(base, index=idx, name="dam_eur_mwh")   
 
             # Minimal features + target
-            X_min = pd.DataFrame({ "hour": idx.hour, "dow": idx.dayofweek, "month": idx.month,"is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),"dam_eur_mwh": dam_series.values}, index=idx)
+            X_min = pd.DataFrame({
+                "hour": idx.hour,
+                "dow": idx.dayofweek,
+                "month": idx.month,
+                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
+                "dam_eur_mwh": dam_series.values
+            }, index=idx)
             y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
+
+            # 🔧 drop rows with invalid target (last 24h etc.)
+            mask = y_min.notna() & np.isfinite(y_min)
+            X_min = X_min[mask]
+            y_min = y_min[mask]
 
             out = X_min.copy()
             out["target"] = y_min
@@ -227,6 +239,11 @@ def ensure_dataset():
             }, index=idx)
             y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
 
+            # 🔧 drop rows with invalid target
+            mask = y_min.notna() & np.isfinite(y_min)
+            X_min = X_min[mask]
+            y_min = y_min[mask]
+
             out = X_min.copy()
             out["target"] = y_min
             DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -234,14 +251,7 @@ def ensure_dataset():
             status.update(label="Done (minimal synthetic)", state="complete")
             return
 
-
-
-
-
-
-
-
-        
+        # -------- Normal path continues here --------
         dam_df["ts_utc"] = pd.to_datetime(dam_df["ts_utc"], utc=True)
         dam_df = dam_df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
 
@@ -260,6 +270,11 @@ def ensure_dataset():
                 "dam_eur_mwh": dam_series.values
             }, index=idx)
             y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
+
+            # 🔧 drop rows with invalid target
+            mask = y_min.notna() & np.isfinite(y_min)
+            X_min = X_min[mask]
+            y_min = y_min[mask]
 
             out = X_min.copy()
             out["target"] = y_min
@@ -321,6 +336,11 @@ def ensure_dataset():
             }, index=idx)
             y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
 
+            # 🔧 drop rows with invalid target
+            mask = y_min.notna() & np.isfinite(y_min)
+            X_min = X_min[mask]
+            y_min = y_min[mask]
+
             out = X_min.copy()
             out["target"] = y_min
             DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -369,6 +389,7 @@ def ensure_dataset():
         out.to_parquet(DATA_PATH)
 
         status.update(label=f"Done — {len(out):,} rows saved", state="complete")
+
 
 
 
