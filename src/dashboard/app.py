@@ -23,7 +23,8 @@ import requests
 
 # ---- Project imports (use 'data.*' / 'features.*' with our path bootstrap)
 # from data.semopx_api import fetch_dam_hrp_recent
-from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked, Entsoe
+from data.eirgrid_prices import fetch_dam_recent  
+# from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked, Entsoe
 from entsoe.exceptions import NoMatchingDataError
 from data.weather import fetch_hourly
 from features.build_features import build_feature_table
@@ -48,20 +49,23 @@ TIME_BUDGET = st.sidebar.slider("Build time budget (sec)", 15, 180, 45)
 @st.cache_data(ttl=60*30, show_spinner=False)
 def build_dam_cached(fast_mode: bool, days: int) -> pd.DataFrame:
     """
-    Fetch Irish DAM prices from ENTSO-E only.
+    Fetch Irish DAM prices from EirGrid (Smart Grid Dashboard).
+    ENTSO-E and SEMOpx are NOT used here.
     """
-    entsoe_df = fetch_ie_dam_chunked(
-        days=days,
-        chunk_days=7,
-        force_refresh=not fast_mode,
-        delay_days=3,
-        fallback_semopx=False,   # 🔴 disable SEMOpx fallback
-    )
-    if isinstance(entsoe_df, pd.Series):
-        entsoe_df = entsoe_df.to_frame("dam_eur_mwh")
+    df = fetch_dam_recent(days=days, force_refresh=not fast_mode)
 
-    entsoe_df.index = pd.DatetimeIndex(entsoe_df.index, tz="UTC")
-    return entsoe_df.rename_axis("ts_utc").reset_index()
+    # df is indexed by UTC; turn it into a clean ['ts_utc','dam_eur_mwh'] table
+    if isinstance(df, pd.Series):
+        df = df.to_frame("dam_eur_mwh")
+
+    df = df.copy()
+    if "ts_utc" not in df.columns:
+        df["ts_utc"] = df.index
+
+    df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)
+    df = df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last")
+
+    return df.rename_axis("ts_utc").reset_index()
 
 
 @st.cache_data(ttl=60*30, show_spinner=False)
