@@ -326,8 +326,7 @@ def ensure_dataset():
         valid = y.notna()
         if "dam_eur_mwh" in X.columns:
             valid &= X["dam_eur_mwh"].notna()
-        if "load_forecast_mw" in X.columns:
-            valid &= X["load_forecast_mw"].notna()
+        
         X = X[valid]
         y = y[valid]
         if X.empty:
