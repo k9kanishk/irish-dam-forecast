@@ -39,10 +39,10 @@ st.set_page_config(
 )
 
 # Sidebar toggles
-FAST_MODE = st.sidebar.checkbox("⚡ Fast mode (use cache, skip SEMOpx if slow)", value=True)
-DAYS = st.sidebar.slider("History window (days)", 7, 60, 21)
-# Add a hard time budget for the build to keep the UI responsive
-TIME_BUDGET = st.sidebar.slider("Build time budget (sec)", 15, 180, 45)
+# FAST_MODE = st.sidebar.checkbox("⚡ Fast mode (use cache, skip SEMOpx if slow)", value=True)
+DAYS = 21
+TIME_BUDGET = 63
+st.sidebar.info("Using synthetic demo data (no live market prices).")
 
 
 # -------------------- Caching wrappers --------------------
@@ -170,7 +170,7 @@ def ensure_dataset():
 
         def _get_dam():
             # call the cached wrapper; it may still do network I/O
-            return build_dam_cached(FAST_MODE, DAYS)  # ['ts_utc','dam_eur_mwh']
+            return build_dam_cached(False, DAYS)  # ['ts_utc','dam_eur_mwh']
             
         try:
             # use 80% of the total budget for DAM; the rest is for fundamentals/features
