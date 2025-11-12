@@ -2,8 +2,11 @@
 # --- Path bootstrap: make `src/` importable when running as a script ---
 import os, sys
 from pathlib import Path
-DAM_PATH = Path("data/raw/irish_dam_history.parquet")
-
+LOOKBACK_DIR = Path(_SRC_DIR) / "data" / "raw"   # src/data/raw
+LOOKBACK_FILES = [
+    LOOKBACK_DIR / "lookback_mkt.xlsx",
+    LOOKBACK_DIR / "Lookback2_mkt.xlsx",
+]
 
 _THIS_DIR = os.path.dirname(__file__)
 _SRC_DIR  = os.path.abspath(os.path.join(_THIS_DIR, ".."))   # -> .../src
@@ -50,30 +53,46 @@ TIME_BUDGET = 63
 @st.cache_data(ttl=None, show_spinner=False)
 def build_dam_cached(days: int) -> pd.DataFrame:
     """
-    Use locally stored Irish DAM history from SEMOpx lookback workbooks.
+    Build Irish DAM price history directly from SEMOpx lookback workbooks
+    (lookback_mkt.xlsx + Lookback2_mkt.xlsx in src/data/raw).
     """
-    if not DAM_PATH.exists():
+    frames = []
+
+    for path in LOOKBACK_FILES:
+        if not path.exists():
+            continue
+
+        # sheet with auction results
+        df = pd.read_excel(path, sheet_name="auctions_to", engine="openpyxl")
+
+        # keep only day-ahead auction rows
+        df = df[df["auction"].astype(str).str.upper().str.startswith("DAM")].copy()
+
+        # timestamp is UTC ISO string
+        df["ts_utc"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+
+        # EUR/MWh price
+        df["dam_eur_mwh"] = pd.to_numeric(df["price_eur"], errors="coerce")
+
+        frames.append(df[["ts_utc", "dam_eur_mwh"]])
+
+    if not frames:
         raise RuntimeError(
-            "Irish DAM history not found at data/raw/irish_dam_history.parquet. "
-            "Run scripts/build_irish_dam_history.py first."
+            "No SEMOpx lookback workbooks found at src/data/raw/"
+            " (lookback_mkt.xlsx, Lookback2_mkt.xlsx)."
         )
 
-    df = pd.read_parquet(DAM_PATH)
+    df = pd.concat(frames, ignore_index=True)
+    df = df.dropna(subset=["ts_utc", "dam_eur_mwh"])
+    df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)
 
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index, utc=True)
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
+    df = df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last")
 
-    df = df.sort_index().drop_duplicates()
+    # keep only last `days` worth
+    cutoff = df["ts_utc"].max() - pd.Timedelta(days=days)
+    df = df[df["ts_utc"] >= cutoff]
 
-    # keep only last `days` days
-    cutoff = df.index.max() - pd.Timedelta(days=days)
-    df = df[df.index >= cutoff]
-
-    df = df.rename_axis("ts_utc").reset_index()
-    df["dam_eur_mwh"] = pd.to_numeric(df["dam_eur_mwh"], errors="coerce")
-    return df
+    return df.reset_index(drop=True)
 
 
 
