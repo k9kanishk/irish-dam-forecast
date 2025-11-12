@@ -2,6 +2,8 @@
 # --- Path bootstrap: make `src/` importable when running as a script ---
 import os, sys
 from pathlib import Path
+DAM_PATH = Path("data/raw/irish_dam_history.parquet")
+
 
 _THIS_DIR = os.path.dirname(__file__)
 _SRC_DIR  = os.path.abspath(os.path.join(_THIS_DIR, ".."))   # -> .../src
@@ -45,26 +47,34 @@ TIME_BUDGET = 63
 
 
 # -------------------- Caching wrappers --------------------
-@st.cache_data(ttl=60*30, show_spinner=False)
-def build_dam_cached(fast_mode: bool, days: int) -> pd.DataFrame:
+@st.cache_data(ttl=None, show_spinner=False)
+def build_dam_cached(days: int) -> pd.DataFrame:
     """
-    Fetch Irish DAM prices from EirGrid (Smart Grid Dashboard).
-    ENTSO-E and SEMOpx are NOT used here.
+    Use locally stored Irish DAM history from SEMOpx lookback workbooks.
     """
-    df = fetch_dam_recent(days=days, force_refresh=not fast_mode)
+    if not DAM_PATH.exists():
+        raise RuntimeError(
+            "Irish DAM history not found at data/raw/irish_dam_history.parquet. "
+            "Run scripts/build_irish_dam_history.py first."
+        )
 
-    # df is indexed by UTC; turn it into a clean ['ts_utc','dam_eur_mwh'] table
-    if isinstance(df, pd.Series):
-        df = df.to_frame("dam_eur_mwh")
+    df = pd.read_parquet(DAM_PATH)
 
-    df = df.copy()
-    if "ts_utc" not in df.columns:
-        df["ts_utc"] = df.index
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, utc=True)
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
 
-    df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)
-    df = df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last")
+    df = df.sort_index().drop_duplicates()
 
-    return df.rename_axis("ts_utc").reset_index()
+    # keep only last `days` days
+    cutoff = df.index.max() - pd.Timedelta(days=days)
+    df = df[df.index >= cutoff]
+
+    df = df.rename_axis("ts_utc").reset_index()
+    df["dam_eur_mwh"] = pd.to_numeric(df["dam_eur_mwh"], errors="coerce")
+    return df
+
 
 
 @st.cache_data(ttl=60*30, show_spinner=False)
@@ -168,8 +178,8 @@ def ensure_dataset():
         dam_df = None
 
         def _get_dam():
-            # call the cached wrapper; it may still do network I/O
-            return build_dam_cached(False, DAYS)  # ['ts_utc','dam_eur_mwh']
+            return build_dam_cached(DAYS)
+            
             
         try:
             # use 80% of the total budget for DAM; the rest is for fundamentals/features
