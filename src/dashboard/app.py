@@ -331,15 +331,28 @@ def ensure_dataset():
 
         # Convert to Dublin tz-naive to align with your feature builder
         def _to_dublin_naive(x):
+            """Ensure index is tz-naive Europe/Dublin, if possible."""
             if not hasattr(x, "index"):
                 return x
+
             idx = x.index
-            if getattr(idx, "tz", None) is not None:
+
+            # Make sure we have a DatetimeIndex first
+            if not isinstance(idx, pd.DatetimeIndex):
+                try:
+                    idx = pd.to_datetime(idx, utc=True, errors="coerce")
+                except Exception:
+                    return x  # can't interpret as dates, just return unchanged
+
+            # Now handle time zones
+            if idx.tz is not None:
                 idx = idx.tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
             else:
-                idx = idx.tz_localize(ZoneInfo("UTC")).tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
+                idx = idx.tz_localize("UTC").tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
+
             x.index = idx
             return x
+
 
         load_fc = _to_dublin_naive(load_fc)
         ws_fc   = _to_dublin_naive(ws_fc)
