@@ -624,7 +624,7 @@ with st.expander("🔍 Model Performance"):
             mode="lines+markers",
             name="Actual"
         ))
-        fig_perf.add_trace(go.Sccatter(
+        fig_perf.add_trace(go.Scatter(
             x=perf_df.index,
             y=perf_df["predicted"],
             mode="lines+markers",
