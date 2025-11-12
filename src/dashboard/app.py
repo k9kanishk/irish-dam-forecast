@@ -175,7 +175,7 @@ def ensure_dataset():
     t0 = time.perf_counter()
 
     def over_budget() -> bool:
-        return (time.perf_counter() - t0) > TIME_BUDGET
+        return False
 
     with st.status("Building dataset…", expanded=True) as status:
         # Quick freshness: re-use file if <6h old
