@@ -19,3 +19,21 @@ python scripts/evaluate.py
 streamlit run src/dashboard/app.py
 ```
 See `config.yaml` for settings (zone, timezone, weather coords).
+
+## Updating SEMOpx data
+
+The app does **not** scrape SEMOpx live. Instead it uses the official
+“lookback” workbooks as the source of truth for historical Irish DAM prices.
+
+To refresh the data:
+
+1. Download the latest **SEMOpx Ex-Ante Market look back** files:
+   - `lookback_mkt.xlsx` (older history)
+   - `Lookback2_mkt.xlsx` (recent history)
+   from the SEMOpx Document Library.
+
+2. Save them into the repo at:
+
+   ```text
+   src/data/raw/lookback_mkt.xlsx
+   src/data/raw/Lookback2_mkt.xlsx
