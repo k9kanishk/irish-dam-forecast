@@ -609,6 +609,51 @@ with st.expander("🔍 Model Performance"):
         else:
             st.success(f"✅ MAE of €{mae:.2f}/MWh looks reasonable for Irish DAM")
 
+        # --- NEW: Actual vs Predicted chart ---
+        perf_df = pd.DataFrame({
+            "actual": y_test,
+            "predicted": test_pred,
+        })
+        perf_df = perf_df.sort_index()
+
+        import plotly.graph_objects as go
+        fig_perf = go.Figure()
+        fig_perf.add_trace(go.Scatter(
+            x=perf_df.index,
+            y=perf_df["actual"],
+            mode="lines+markers",
+            name="Actual"
+        ))
+        fig_perf.add_trace(go.Sccatter(
+            x=perf_df.index,
+            y=perf_df["predicted"],
+            mode="lines+markers",
+            name="Predicted"
+        ))
+        fig_perf.update_layout(
+            title="Actual vs Predicted (last 7 days)",
+            xaxis_title="Delivery hour",
+            yaxis_title="Price (€/MWh)",
+            hovermode="x unified",
+            height=350,
+        )
+        st.plotly_chart(fig_perf, use_container_width=True)
+
+        # Optional: small table of errors
+        perf_df["abs_error"] = (perf_df["predicted"] - perf_df["actual"]).abs()
+        with st.expander("📋 Last 7 days – detailed errors", expanded=False):
+            st.dataframe(
+                perf_df[["actual", "predicted", "abs_error"]]
+                .rename(columns={
+                    "actual": "Actual (€/MWh)",
+                    "predicted": "Predicted (€/MWh)",
+                    "abs_error": "|Error| (€/MWh)",
+                }),
+                use_container_width=True,
+            )
+    else:
+        st.info("Need at least 14 days of data to compute a 7-day backtest.")
+
 # -------------------- Footer --------------------
 st.markdown("---")
 st.caption("💡 Data: SEMOpx (HRP) / ENTSO-E | Weather: Open-Meteo | Built with Streamlit")
