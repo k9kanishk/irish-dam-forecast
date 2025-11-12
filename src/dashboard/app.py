@@ -2,16 +2,18 @@
 # --- Path bootstrap: make `src/` importable when running as a script ---
 import os, sys
 from pathlib import Path
+
+_THIS_DIR = os.path.dirname(__file__)
+_SRC_DIR  = os.path.abspath(os.path.join(_THIS_DIR, ".."))   # -> .../src
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
 LOOKBACK_DIR = Path(_SRC_DIR) / "data" / "raw"   # src/data/raw
 LOOKBACK_FILES = [
     LOOKBACK_DIR / "lookback_mkt.xlsx",
     LOOKBACK_DIR / "Lookback2_mkt.xlsx",
 ]
 
-_THIS_DIR = os.path.dirname(__file__)
-_SRC_DIR  = os.path.abspath(os.path.join(_THIS_DIR, ".."))   # -> .../src
-if _SRC_DIR not in sys.path:
-    sys.path.insert(0, _SRC_DIR)
 
 # ---- Standard libs
 from datetime import datetime, timedelta
