@@ -32,6 +32,7 @@ import requests
 # from data.semopx_api import fetch_dam_hrp_recent
 from data.eirgrid_prices import fetch_dam_recent  
 # from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked, Entsoe
+from data.entsoe_api import Entsoe    
 from entsoe.exceptions import NoMatchingDataError
 from data.weather import fetch_hourly
 from features.build_features import build_feature_table
