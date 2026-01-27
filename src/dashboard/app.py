@@ -2,17 +2,30 @@
 # --- Path bootstrap: make `src/` importable when running as a script ---
 import os, sys
 from pathlib import Path
+import pandas as pd
 
 _THIS_DIR = os.path.dirname(__file__)
 _SRC_DIR  = os.path.abspath(os.path.join(_THIS_DIR, ".."))   # -> .../src
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-LOOKBACK_DIR = Path(_SRC_DIR) / "data" / "raw"   # src/data/raw
-LOOKBACK_FILES = [
-    LOOKBACK_DIR / "lookback_mkt.xlsx",
-    LOOKBACK_DIR / "Lookback2_mkt.xlsx",
+DAM_EXCEL_CANDIDATES = [
+    Path("data/raw/dam_prices.xlsx"),
+    Path("data/raw/Dam Prices.xlsx"),
+    Path("src/data/raw/dam_prices.xlsx"),
+    Path("src/data/raw/Dam Prices.xlsx"),
+    Path("/mnt/data/Dam Prices.xlsx"),  # if you're running in a container like here
 ]
+
+DAM_PARQUET_CACHE = Path("data/raw/dam_prices.parquet")
+
+def _find_dam_excel() -> Path:
+    for p in DAM_EXCEL_CANDIDATES:
+        if p.exists():
+            return p
+    raise FileNotFoundError(
+        "DAM Excel not found. Put it at data/raw/dam_prices.xlsx (recommended)."
+    )
 
 
 # ---- Standard libs
@@ -22,21 +35,18 @@ from zoneinfo import ZoneInfo
 import time  # <-- add this
 
 # ---- Third-party
-import pandas as pd
 import numpy as np
 import streamlit as st
 import yaml
 import requests
 
 # ---- Project imports (use 'data.*' / 'features.*' with our path bootstrap)
-from data.semopx_api import fetch_dam_hrp_recent
 # from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked, Entsoe
 from data.entsoe_api import Entsoe    
-from entsoe.exceptions import NoMatchingDataError
 from data.weather import fetch_hourly
 from features.build_features import build_feature_table
 from features.targets import make_day_ahead_target
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
 
 # -------------------- Page / Sidebar --------------------
 st.set_page_config(
@@ -48,61 +58,57 @@ st.set_page_config(
 # Sidebar toggles
 # FAST_MODE = st.sidebar.checkbox("⚡ Fast mode (use cache, skip SEMOpx if slow)", value=True)
 DAYS = 21
-TIME_BUDGET = 63
 
 
 # -------------------- Caching wrappers --------------------
-@st.cache_data(ttl=60*15, show_spinner=False)
+@st.cache_data(ttl=60*60, show_spinner=False)
 def build_dam_cached(days: int) -> pd.DataFrame:
     """
-    Build DAM history from:
-      1) SEMOpx lookback workbooks (history)
-      2) SEM-O HRP API (latest days)
-    Returns: DataFrame with columns [ts_utc, dam_eur_mwh] (UTC)
+    FAST: read DAM only from the cleaned Excel (auction,timestamp,price_eur),
+    and cache as Parquet for instant reloads.
+    Returns columns: ts_utc, dam_eur_mwh (UTC)
     """
-    frames = []
+    excel_path = _find_dam_excel()
 
-    # --- 1) Lookback Excel history ---
-    for path in LOOKBACK_FILES:
-        if not path.exists():
-            continue
+    # If parquet exists and is newer than excel, load parquet (fastest)
+    if DAM_PARQUET_CACHE.exists():
+        if DAM_PARQUET_CACHE.stat().st_mtime >= excel_path.stat().st_mtime:
+            df = pd.read_parquet(DAM_PARQUET_CACHE)
+            df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True, errors="coerce")
+            df["dam_eur_mwh"] = pd.to_numeric(df["dam_eur_mwh"], errors="coerce")
+            df = df.dropna(subset=["ts_utc", "dam_eur_mwh"]).sort_values("ts_utc")
+        else:
+            df = None
+    else:
+        df = None
 
-        df = pd.read_excel(path, sheet_name="auctions_to", engine="openpyxl")
-        df = df[df["auction"].astype(str).str.upper().str.startswith("DAM")].copy()
-        df["ts_utc"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-        df["dam_eur_mwh"] = pd.to_numeric(df["price_eur"], errors="coerce")
-        df = df[["ts_utc", "dam_eur_mwh"]].dropna()
-        frames.append(df)
-
-    # --- 2) Latest days via SEM-O HRP API ---
-    # HRP feed is great for "most recent days" automation.
-    try:
-        hrp = fetch_dam_hrp_recent(days=min(max(days, 7), 35), force=False)
-        if isinstance(hrp, pd.DataFrame) and not hrp.empty:
-            hrp["ts_utc"] = pd.to_datetime(hrp["ts_utc"], utc=True, errors="coerce")
-            hrp["dam_eur_mwh"] = pd.to_numeric(hrp["dam_eur_mwh"], errors="coerce")
-            hrp = hrp[["ts_utc", "dam_eur_mwh"]].dropna()
-            frames.append(hrp)
-    except Exception:
-        # don’t kill the app if SEM-O API is down; lookback still works
-        pass
-
-    if not frames:
-        raise RuntimeError(
-            "No DAM data sources available. "
-            "Put lookback workbooks in src/data/raw or ensure SEM-O API works."
+    if df is None:
+        # Read ONLY required cols (fast)
+        raw = pd.read_excel(
+            excel_path,
+            sheet_name=0,
+            engine="openpyxl",
+            usecols=["auction", "timestamp", "price_eur"],
         )
 
-    out = pd.concat(frames, ignore_index=True)
-    out = out.dropna(subset=["ts_utc", "dam_eur_mwh"])
-    out["ts_utc"] = pd.to_datetime(out["ts_utc"], utc=True)
+        # Filter DAM rows just in case
+        raw["auction"] = raw["auction"].astype(str)
+        raw = raw[raw["auction"].str.upper().str.startswith("DAM")].copy()
 
-    out = out.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last")
+        raw["ts_utc"] = pd.to_datetime(raw["timestamp"], utc=True, errors="coerce")
+        raw["dam_eur_mwh"] = pd.to_numeric(raw["price_eur"], errors="coerce")
 
-    # keep only last `days` worth
-    cutoff = out["ts_utc"].max() - pd.Timedelta(days=days)
-    out = out[out["ts_utc"] >= cutoff].reset_index(drop=True)
-    return out
+        df = raw[["ts_utc", "dam_eur_mwh"]].dropna().sort_values("ts_utc")
+        df = df.drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
+
+        # Save parquet cache for next time
+        DAM_PARQUET_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(DAM_PARQUET_CACHE, index=False)
+
+    # Keep only last `days`
+    cutoff = df["ts_utc"].max() - pd.Timedelta(days=days)
+    df = df[df["ts_utc"] >= cutoff].reset_index(drop=True)
+    return df
 
 
 
@@ -185,11 +191,11 @@ def ensure_dataset():
         return False
 
     with st.status("Building dataset…", expanded=True) as status:
-        # Quick freshness: re-use file if <30m old
+        # Quick freshness: re-use file if <10m old
         if DATA_PATH.exists():
             mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
-            if datetime.now() - mod_time < timedelta(minutes=30):
-                st.write("✅ Using cached dataset on disk (fresh <30m).")
+            if datetime.now() - mod_time < timedelta(minutes=10):
+                st.write("✅ Using cached dataset on disk (fresh <10m).")
                 status.update(label="Done", state="complete")
                 return
 
@@ -206,53 +212,8 @@ def ensure_dataset():
         st.write("🔹 Fetching DAM prices…")
         dam_df = None
 
-        def _get_dam():
-            return build_dam_cached(DAYS)
-            
-            
         try:
-            # use 80% of the total budget for DAM; the rest is for fundamentals/features
-            dam_timeout = max(5, int(TIME_BUDGET * 0.8))
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(_get_dam)
-                dam_df = fut.result(timeout=dam_timeout)
-
-        except FuturesTimeout:
-            st.write("⏳ DAM fetch exceeded time budget.")
-            # If we have a previous dataset on disk, use it and stop the build early.
-            if DATA_PATH.exists():
-                st.write("↩️ Using last saved dataset instead.")
-                status.update(label="Done (fallback to cached file)", state="complete")
-                return
-            # No cached file: fall back to a tiny, synthetic dataset so UI stays responsive.
-            # (This keeps the app usable; you can rebuild later with a larger budget.)
-            st.write("🛟 No cached file. Creating minimal synthetic dataset.")
-            end_local = pd.Timestamp.now(tz="Europe/Dublin").floor("H")
-            idx = pd.date_range(end=end_local, periods=DAYS * 24, freq="H")
-            base = 80 + 10 * np.sin(2 * np.pi * (idx.hour / 24.0))  # simple diurnal curve
-            dam_series = pd.Series(base, index=idx, name="dam_eur_mwh")   
-
-            # Minimal features + target
-            X_min = pd.DataFrame({
-                "hour": idx.hour,
-                "dow": idx.dayofweek,
-                "month": idx.month,
-                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
-                "dam_eur_mwh": dam_series.values
-            }, index=idx)
-            y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
-
-            # 🔧 drop rows with invalid target (last 24h etc.)
-            mask = y_min.notna() & np.isfinite(y_min)
-            X_min = X_min[mask]
-            y_min = y_min[mask]
-
-            out = X_min.copy()
-            out["target"] = y_min
-            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-            out.to_parquet(DATA_PATH)
-            status.update(label="Done (minimal synthetic)", state="complete")
-            return   
+            dam_df = build_dam_cached(DAYS)  # local file; no threadpool needed
 
         except Exception as e:
             st.write(f"⚠️ DAM fetch failed: {e}")
