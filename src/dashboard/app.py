@@ -29,8 +29,7 @@ import yaml
 import requests
 
 # ---- Project imports (use 'data.*' / 'features.*' with our path bootstrap)
-# from data.semopx_api import fetch_dam_hrp_recent
-from data.eirgrid_prices import fetch_dam_recent  
+from data.semopx_api import fetch_dam_hrp_recent
 # from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked, Entsoe
 from data.entsoe_api import Entsoe    
 from entsoe.exceptions import NoMatchingDataError
@@ -53,49 +52,57 @@ TIME_BUDGET = 63
 
 
 # -------------------- Caching wrappers --------------------
-@st.cache_data(ttl=None, show_spinner=False)
+@st.cache_data(ttl=60*15, show_spinner=False)
 def build_dam_cached(days: int) -> pd.DataFrame:
     """
-    Build Irish DAM price history directly from SEMOpx lookback workbooks
-    (lookback_mkt.xlsx + Lookback2_mkt.xlsx in src/data/raw).
+    Build DAM history from:
+      1) SEMOpx lookback workbooks (history)
+      2) SEM-O HRP API (latest days)
+    Returns: DataFrame with columns [ts_utc, dam_eur_mwh] (UTC)
     """
     frames = []
 
+    # --- 1) Lookback Excel history ---
     for path in LOOKBACK_FILES:
         if not path.exists():
             continue
 
-        # sheet with auction results
         df = pd.read_excel(path, sheet_name="auctions_to", engine="openpyxl")
-
-        # keep only day-ahead auction rows
         df = df[df["auction"].astype(str).str.upper().str.startswith("DAM")].copy()
-
-        # timestamp is UTC ISO string
         df["ts_utc"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-
-        # EUR/MWh price
         df["dam_eur_mwh"] = pd.to_numeric(df["price_eur"], errors="coerce")
+        df = df[["ts_utc", "dam_eur_mwh"]].dropna()
+        frames.append(df)
 
-        frames.append(df[["ts_utc", "dam_eur_mwh"]])
+    # --- 2) Latest days via SEM-O HRP API ---
+    # HRP feed is great for "most recent days" automation.
+    try:
+        hrp = fetch_dam_hrp_recent(days=min(max(days, 7), 35), force=False)
+        if isinstance(hrp, pd.DataFrame) and not hrp.empty:
+            hrp["ts_utc"] = pd.to_datetime(hrp["ts_utc"], utc=True, errors="coerce")
+            hrp["dam_eur_mwh"] = pd.to_numeric(hrp["dam_eur_mwh"], errors="coerce")
+            hrp = hrp[["ts_utc", "dam_eur_mwh"]].dropna()
+            frames.append(hrp)
+    except Exception:
+        # don’t kill the app if SEM-O API is down; lookback still works
+        pass
 
     if not frames:
         raise RuntimeError(
-            "No SEMOpx lookback workbooks found at src/data/raw/"
-            " (lookback_mkt.xlsx, Lookback2_mkt.xlsx)."
+            "No DAM data sources available. "
+            "Put lookback workbooks in src/data/raw or ensure SEM-O API works."
         )
 
-    df = pd.concat(frames, ignore_index=True)
-    df = df.dropna(subset=["ts_utc", "dam_eur_mwh"])
-    df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)
+    out = pd.concat(frames, ignore_index=True)
+    out = out.dropna(subset=["ts_utc", "dam_eur_mwh"])
+    out["ts_utc"] = pd.to_datetime(out["ts_utc"], utc=True)
 
-    df = df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last")
+    out = out.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last")
 
     # keep only last `days` worth
-    cutoff = df["ts_utc"].max() - pd.Timedelta(days=days)
-    df = df[df["ts_utc"] >= cutoff]
-
-    return df.reset_index(drop=True)
+    cutoff = out["ts_utc"].max() - pd.Timedelta(days=days)
+    out = out[out["ts_utc"] >= cutoff].reset_index(drop=True)
+    return out
 
 
 
@@ -178,11 +185,11 @@ def ensure_dataset():
         return False
 
     with st.status("Building dataset…", expanded=True) as status:
-        # Quick freshness: re-use file if <6h old
+        # Quick freshness: re-use file if <30m old
         if DATA_PATH.exists():
             mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
-            if datetime.now() - mod_time < timedelta(hours=6):
-                st.write("✅ Using cached dataset on disk (fresh < 6h).")
+            if datetime.now() - mod_time < timedelta(minutes=30):
+                st.write("✅ Using cached dataset on disk (fresh <30m).")
                 status.update(label="Done", state="complete")
                 return
 
@@ -440,6 +447,10 @@ def ensure_dataset():
 # -------------------- Sidebar: Data management --------------------
 with st.sidebar:
     st.header("📊 Data Management")
+    if st.button("⟳ Refresh latest prices (no full rebuild)"):
+        st.cache_data.clear()
+        st.rerun()
+
     if st.button("🔄 Rebuild Dataset", help="Force refresh all data"):
         if DATA_PATH.exists():
             DATA_PATH.unlink()
@@ -471,6 +482,15 @@ try:
 except FileNotFoundError:
     st.error("Dataset file not found. Please rebuild.")
     st.stop()
+
+# Sidebar: latest published DAM (from dataset)
+with st.sidebar:
+    if "dam_eur_mwh" in df.columns and len(df) > 0:
+        last_ts = pd.Timestamp(df.index.max())
+        last_val = float(df.loc[df.index.max(), "dam_eur_mwh"]) if df.index.max() in df.index else float("nan")
+        st.markdown("### ⚡ Latest published DAM")
+        st.write(f"**Time (delivery)**: {last_ts}")
+        st.write(f"**Price**: €{last_val:.2f}/MWh")
 
 # -------------------- Train model --------------------
 y = df.pop("target") if "target" in df.columns else pd.Series(index=df.index)
