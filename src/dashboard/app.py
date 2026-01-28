@@ -392,7 +392,7 @@ def ensure_dataset():
             st.stop()
 
         # Impute small gaps
-        X = X.fillna(method="ffill", limit=24).fillna(method="bfill", limit=24).fillna(0)
+        X = X.ffill(limit=24).bfill(limit=24).fillna(0)
 
         # Save dataset
         out = X.copy()
