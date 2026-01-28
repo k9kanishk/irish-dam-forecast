@@ -15,3 +15,5 @@ tzdata>=2024.1
 entsoe-py>=0.6.8
 pytz
 openpyxl>=3.1.0
+optuna>=3.6
+pytest>=8.2

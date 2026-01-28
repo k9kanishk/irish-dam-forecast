@@ -79,9 +79,3 @@ def build_feature_table(
     
     return df
 
-
-# Also update the targets.py if needed
-def make_day_ahead_target(dam: pd.Series) -> pd.Series:
-    """Create target variable - next day prices"""
-    y = dam.shift(-24).rename('y_dam_eur_mwh')
-    return y
