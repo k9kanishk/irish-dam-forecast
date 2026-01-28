@@ -1,22 +1,84 @@
+project:
+  name: "Irish DAM Forecast"
+  version: "2.0.0"
+
 paths:
   raw: data/raw
   interim: data/interim
   processed: data/processed
+  models: models
+  logs: logs
+
 market:
   bidding_zone: IE
   currency: EUR
   tz: Europe/Dublin
+  price_cap: 4000
+  price_floor: -500
+
+data_sources:
+  primary: semopx
+  fallback: [entsoe, eirgrid]
+
+  entsoe:
+    area_codes: ["IE", "SEM", "10YIE-1001A00010"]
+    delay_days: 2
+
+  weather:
+    provider: open_meteo
+    lat: 53.4
+    lon: -8.2
+    variables: [wind_speed_100m, temperature_2m, cloud_cover]
+
 weather:
   lat: 53.4
   lon: -8.2
   height_m: 100
   use_cap_weighting: false
+
 features:
+  price_lags: [1, 2, 3, 6, 12, 24, 48, 72, 168]
+  rolling_windows: [6, 12, 24, 48, 168]
+  include_calendar: true
+  include_weather: true
   include_interconnectors: true
   include_fuels: false
+
+model:
+  type: xgb_quantile
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+
+  xgboost:
+    n_estimators: 1000
+    max_depth: 6
+    learning_rate: 0.03
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_lambda: 2.0
+
+  lightgbm:
+    n_estimators: 1000
+    num_leaves: 63
+    learning_rate: 0.03
+
+training:
+  min_history_days: 90
+  validation_days: 30
+  cv_splits: 5
+  retrain_frequency_days: 7
+
+evaluation:
+  metrics: [mae, rmse, mape, coverage]
+  error_analysis_by: [hour, dow, price_level]
+
+dashboard:
+  cache_ttl_minutes: 30
+  default_days: 21
+  refresh_interval_minutes: 60
+
 train:
-  start: "2025-07-01"    # Changed to more recent
-  end: "2025-10-31"      # Should be 3-5 days before today
+  start: "2025-07-01"
+  end: "2025-10-31"
   horizon_hours: 24
   model: xgb
   cv_splits: 12
