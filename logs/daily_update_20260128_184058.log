@@ -1,0 +1,9 @@
+2026-01-28 18:40:58,344 [INFO] ============================================================
+2026-01-28 18:40:58,344 [INFO] Starting daily update
+2026-01-28 18:40:58,344 [INFO] Time: 2026-01-28 18:40:58.344758
+2026-01-28 18:40:58,344 [INFO] ============================================================
+2026-01-28 18:40:58,345 [INFO] Fetching DAM prices for last 90 days...
+2026-01-28 19:17:39,763 [WARNING] SEMOpx HRP API failed: No HRP files downloaded in the requested window.
+2026-01-28 19:17:39,837 [WARNING] ENTSO-E failed: [ENTSOE] Error for chunk 2025-10-27->ENTSOE_TOKEN not set (env or .streamlit/secrets.toml).: ENTSOE_TOKEN not set (env or .streamlit/secrets.toml).
+2026-01-28 19:17:39,837 [ERROR] All DAM price sources failed!
+2026-01-28 19:17:39,838 [ERROR] No DAM prices available. Aborting.
