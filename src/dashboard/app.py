@@ -11,17 +11,13 @@ if _SRC_DIR not in sys.path:
 
 # ---- Standard libs
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-
-import time  # <-- add this
 
 # ---- Third-party
 import numpy as np
 import streamlit as st
-import requests
+from xgboost import XGBRegressor
 
 # ---- Project imports (use 'data.*' / 'features.*' with our path bootstrap)
-from data.semopx_hrp60 import update_hrp60_cache, load_hrp60
 from features.build_features import build_feature_table
 from features.targets import make_day_ahead_target
 from models.xgb_model import make_model
@@ -36,267 +32,119 @@ st.set_page_config(
 
 # Sidebar toggles
 # FAST_MODE = st.sidebar.checkbox("⚡ Fast mode (use cache, skip SEMOpx if slow)", value=True)
-DAYS = 21
+RAW_PQ = Path("data/raw/semopx_dam_60min_hrp.parquet")
+RAW_CSV = Path("data/raw/semopx_dam_60min_hrp.csv")
+DATA_PATH = Path("data/processed/train.parquet")
+IE_TZ = "Europe/Dublin"
 
 
 # -------------------- Caching wrappers --------------------
 @st.cache_data(ttl=60*60, show_spinner=False)
-def build_dam_cached(days: int) -> pd.DataFrame:
-    """
-    Update local parquet if stale (fast: only checks + fetches last ~14 days).
-    Returns columns: ts_utc, dam_eur_mwh (UTC).
-    """
-    update_hrp60_cache(days_back=max(14, days), max_age_minutes=15, bidding_area=None)
+def load_hrp60_local(days: int) -> pd.DataFrame:
+    if RAW_PQ.exists():
+        df = pd.read_parquet(RAW_PQ)
+    elif RAW_CSV.exists():
+        df = pd.read_csv(RAW_CSV)
+    else:
+        return pd.DataFrame(columns=["ts_utc", "dam_eur_mwh"])
 
-    df = load_hrp60(days=days, bidding_area=None)
-    df = df.rename(columns={"dam_60min_hrp_eur_mwh": "dam_eur_mwh"})
+    if "dam_60min_hrp_eur_mwh" in df.columns and "dam_eur_mwh" not in df.columns:
+        df = df.rename(columns={"dam_60min_hrp_eur_mwh": "dam_eur_mwh"})
+
+    df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True, errors="coerce")
+    df["dam_eur_mwh"] = pd.to_numeric(df["dam_eur_mwh"], errors="coerce")
+    df = df.dropna(subset=["ts_utc", "dam_eur_mwh"]).sort_values("ts_utc")
+    df = df.drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
+
+    if not df.empty:
+        cutoff = df["ts_utc"].max() - pd.Timedelta(days=days)
+        df = df[df["ts_utc"] >= cutoff].copy()
+
     return df[["ts_utc", "dam_eur_mwh"]]
 
-
-
-@st.cache_data(ttl=60*30, show_spinner=False)
-def build_features_cached(dam_series: pd.Series, load_fc: pd.Series, ws_fc: pd.DataFrame, weather: pd.DataFrame):
-    """
-    Build X and y once and cache the result.
-    """
-    y = make_day_ahead_target(dam_series)             # Series (target aligned to delivery)
-    X = build_feature_table(dam_series, load_fc, ws_fc, weather)  # DataFrame
-    return X, y
-
-from xgboost import XGBRegressor
-
-@st.cache_resource
+@st.cache_resource(hash_funcs={pd.DataFrame: lambda _: 0, pd.Series: lambda _: 0})
 def train_model_cached(X: pd.DataFrame, y: pd.Series, key: str):
     m = make_model()
     m.fit(X, y)
     return m
 
-# -------------------- EirGrid Backup indicator (UI only) --------------------
-class EirGridBackup:
-    """Light indicator if Smart Grid Dashboard responds (not used for build)."""
-    @staticmethod
-    def get_recent_data() -> bool:
-        try:
-            base_url = "https://www.smartgriddashboard.com/DashboardService.svc/data"
-            date_from = (datetime.now() - timedelta(days=7)).strftime("%d-%b-%Y")
-            date_to = datetime.now().strftime("%d-%b-%Y")
-            params = {"area": "windactual", "region": "ALL", "datefrom": date_from, "dateto": date_to}
-            resp = requests.get(base_url, params=params, timeout=10)
-            return resp.status_code == 200
-        except Exception:
-            return False
-
 # -------------------- Dataset build --------------------
-# -------------------- Dataset build --------------------
-DATA_PATH = Path("data/processed/train.parquet")
-
-def ensure_dataset():
-    """Build the training dataset with robust progress + time budget."""
-    t0 = time.perf_counter()
-
-    def over_budget() -> bool:
-        return False
-
-    with st.status("Building dataset…", expanded=True) as status:
-        # Quick freshness: re-use file if <10m old
-        if DATA_PATH.exists():
-            mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
-            if datetime.now() - mod_time < timedelta(minutes=10):
-                st.write("✅ Using cached dataset on disk (fresh <10m).")
-                status.update(label="Done", state="complete")
-                return
-
-        # -------- DAM prices (cached wrappers) --------
-        st.write("🔹 Fetching DAM prices…")
-        dam_df = None
-
-        try:
-            dam_df = build_dam_cached(DAYS)  # local file; no threadpool needed
-
-        except Exception as e:
-            st.write(f"⚠️ DAM fetch failed: {e}")
-            if DATA_PATH.exists():
-                st.write("↩️ Falling back to last saved dataset.")
-                status.update(label="Done (fallback to cached file)", state="complete")
-                return
-
-            # 🛟 No cached file -> synthetic minimal dataset so UI still works
-            st.write("🛟 No DAM data and no cache. Creating minimal synthetic dataset.")
-            end_local = pd.Timestamp.now(tz="Europe/Dublin").floor("H")
-            idx = pd.date_range(end=end_local, periods=DAYS * 24, freq="H")
-            base = 80 + 10 * np.sin(2 * np.pi * (idx.hour / 24.0))
-            dam_series = pd.Series(base, index=idx, name="dam_eur_mwh")
-
-            X_min = pd.DataFrame({
-                "hour": idx.hour,
-                "dow": idx.dayofweek,
-                "month": idx.month,
-                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
-                "dam_eur_mwh": dam_series.values
-            }, index=idx)
-            y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
-
-            # 🔧 drop rows with invalid target
-            mask = y_min.notna() & np.isfinite(y_min)
-            X_min = X_min[mask]
-            y_min = y_min[mask]
-
-            out = X_min.copy()
-            out["target"] = y_min
-            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-            out.to_parquet(DATA_PATH)
-            status.update(label="Done (minimal synthetic)", state="complete")
+def ensure_dataset(days: int):
+    # If dataset exists and is fresh, use it
+    if DATA_PATH.exists():
+        mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
+        if datetime.now() - mod_time < timedelta(minutes=10):
             return
 
-        # -------- Normal path continues here --------
+    dam_df = load_hrp60_local(days)
+    if dam_df.empty:
+        # No HRP60 file -> synthetic fallback so UI still loads
+        end_local = pd.Timestamp.now(tz=IE_TZ).floor("H")
+        idx = pd.date_range(end=end_local, periods=days * 24, freq="H")
+        base = 80 + 10 * np.sin(2 * np.pi * (idx.hour / 24.0))
+        dam = pd.Series(base, index=idx, name="dam_eur_mwh")
+    else:
         dam_df["ts_utc"] = pd.to_datetime(dam_df["ts_utc"], utc=True)
-        dam_df = dam_df.sort_values("ts_utc").drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
+        dam = (
+            dam_df.set_index("ts_utc")["dam_eur_mwh"]
+            .tz_convert(IE_TZ)
+            .tz_localize(None)
+        )
+        dam = dam[~dam.index.duplicated(keep="last")].sort_index()
 
-        # Prepare DAM series in Dublin tz-naive (what your feature builder expects)
-        dam_series = dam_df.set_index("ts_utc")["dam_eur_mwh"].tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
+    # No fundamentals
+    load_fc = pd.Series(index=dam.index, dtype=float, name="load_forecast_mw")
+    ws_fc = pd.DataFrame(index=dam.index)
+    weather = pd.DataFrame(index=dam.index)
 
-        # If we’re already over budget, write a minimal dataset and exit
-        if over_budget():
-            st.write("⏳ Time budget reached after DAM — writing minimal dataset.")
-            idx = dam_series.index
-            X_min = pd.DataFrame({
-                "hour": idx.hour,
-                "dow": idx.dayofweek,
-                "month": idx.month,
-                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
-                "dam_eur_mwh": dam_series.values
-            }, index=idx)
-            y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
+    X = build_feature_table(dam, load_fc, ws_fc, weather)
+    y = make_day_ahead_target(dam).reindex(X.index)
 
-            # 🔧 drop rows with invalid target
-            mask = y_min.notna() & np.isfinite(y_min)
-            X_min = X_min[mask]
-            y_min = y_min[mask]
+    out = X.copy()
+    out["target"] = y
+    out = out.dropna(subset=["target"]).ffill().bfill().fillna(0)
 
-            out = X_min.copy()
-            out["target"] = y_min
-            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-            out.to_parquet(DATA_PATH)
-            status.update(label="Done (minimal features)", state="complete")
-            return
-
-        # -------- Fundamentals skipped (fast path) --------
-        load_fc = pd.Series(dtype=float, name="load_forecast_mw")
-        ws_fc = pd.DataFrame()
-        weather = pd.DataFrame()
-
-        # Deduplicate indices
-        dam_series = dam_series[~dam_series.index.duplicated(keep="last")]
-        if hasattr(load_fc, "index"):
-            load_fc = load_fc[~load_fc.index.duplicated(keep="last")]
-        if hasattr(ws_fc, "index"):
-            ws_fc = ws_fc[~ws_fc.index.duplicated(keep="last")]
-        if hasattr(weather, "index"):
-            weather = weather[~weather.index.duplicated(keep="last")]
-
-        # If over budget here, fall back to minimal features
-        if over_budget():
-            st.write("⏳ Time budget reached during fundamentals — writing minimal dataset.")
-            idx = dam_series.index
-            X_min = pd.DataFrame({
-                "hour": idx.hour,
-                "dow": idx.dayofweek,
-                "month": idx.month,
-                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
-                "dam_eur_mwh": dam_series.values
-            }, index=idx)
-            y_min = make_day_ahead_target(dam_series).reindex(X_min.index)
-
-            # 🔧 drop rows with invalid target
-            mask = y_min.notna() & np.isfinite(y_min)
-            X_min = X_min[mask]
-            y_min = y_min[mask]
-
-            out = X_min.copy()
-            out["target"] = y_min
-            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-            out.to_parquet(DATA_PATH)
-            status.update(label="Done (minimal features)", state="complete")
-            return
-
-        # -------- Build features / target --------
-        st.write("🔹 Building features…")
-        try:
-            X, y = build_features_cached(dam_series, load_fc, ws_fc, weather)
-            if "dam_eur_mwh" not in X.columns:
-                X["dam_eur_mwh"] = dam_series.reindex(X.index)
-            if "load_forecast_mw" not in X.columns and hasattr(load_fc, "reindex"):
-                X["load_forecast_mw"] = load_fc.reindex(X.index)
-        except Exception as e:
-            st.write(f"⚠️ Feature build failed: {e} — falling back to minimal features.")
-            idx = dam_series.index
-            X = pd.DataFrame({
-                "hour": idx.hour,
-                "dow": idx.dayofweek,
-                "month": idx.month,
-                "is_peak": ((idx.hour >= 17) & (idx.hour <= 19)).astype(int),
-                "dam_eur_mwh": dam_series.values
-            }, index=idx)
-            y = make_day_ahead_target(dam_series).reindex(X.index)
-
-        # Filter valid rows
-        valid = y.notna()
-        if "dam_eur_mwh" in X.columns:
-            valid &= X["dam_eur_mwh"].notna()
-        
-        X = X[valid]
-        y = y[valid]
-        if X.empty:
-            st.error("No valid rows after processing.")
-            st.stop()
-
-        # Impute small gaps
-        X = X.ffill(limit=24).bfill(limit=24).fillna(0)
-
-        # Save dataset
-        out = X.copy()
-        out["target"] = y
-        DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(DATA_PATH)
-
-        status.update(label=f"Done — {len(out):,} rows saved", state="complete")
+    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    out.to_parquet(DATA_PATH)
 
 
 
 
 # -------------------- Sidebar: Data management --------------------
 with st.sidebar:
-    st.header("📊 Data Management")
-    if st.button("⟳ Refresh latest prices (no full rebuild)"):
-        update_hrp60_cache(days_back=14, max_age_minutes=0)
+    st.header("📊 Data")
+
+    st.caption("This app reads local SEMOpx HRP60 CSV/Parquet only.")
+
+    up = st.file_uploader("Upload HRP60 (CSV or Parquet)", type=["csv", "parquet"])
+    if up is not None:
+        Path("data/raw").mkdir(parents=True, exist_ok=True)
+        if up.name.endswith(".parquet"):
+            RAW_PQ.write_bytes(up.getvalue())
+            st.success("Saved parquet to data/raw/semopx_dam_60min_hrp.parquet")
+        else:
+            RAW_CSV.write_bytes(up.getvalue())
+            st.success("Saved csv to data/raw/semopx_dam_60min_hrp.csv")
         st.cache_data.clear()
         st.rerun()
 
-    if st.button("🔄 Rebuild Dataset", help="Force refresh all data"):
+    if st.button("🔄 Rebuild Dataset"):
         if DATA_PATH.exists():
             DATA_PATH.unlink()
         st.cache_data.clear()
         st.rerun()
 
-    # Status
     if DATA_PATH.exists():
         mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
-        age = (datetime.now() - mod_time).total_seconds() / 3600
-        if age < 1:
-            status = "🟢 Fresh"
-        elif age < 6:
-            status = "🟡 Recent"
-        else:
-            status = "🔴 Stale"
-        st.markdown(f"**Data Status**\n\n- Status: {status}\n- Updated: {mod_time.strftime('%H:%M')}\n- Age: {age:.1f} h")
-
-    if EirGridBackup.get_recent_data():
-        st.success("✅ EirGrid backup available")
+        age_h = (datetime.now() - mod_time).total_seconds() / 3600
+        st.markdown(f\"**Dataset**: updated {mod_time.strftime('%Y-%m-%d %H:%M')} ({age_h:.1f}h ago)\")
     else:
-        st.info("ℹ️ Using SEMOpx HRP only")
+        st.warning(\"train.parquet missing. App will build it from HRP60 file (if present).\")
+
+    DAYS = st.slider(\"History window (days)\", 7, 365, 60)
 
 # -------------------- Build/load dataset --------------------
-ensure_dataset()
+ensure_dataset(DAYS)
 
 try:
     df = pd.read_parquet(DATA_PATH)
@@ -340,7 +188,7 @@ if X_train.empty:
     st.error("Not enough historical data to train before the selected date.")
     st.stop()
 
-key = str(df.index.max())
+key = f\"{df.index.max()}_{selected_date}\"
 try:
     model = train_model_cached(X_train, y_train, key)
     st.success("✅ Model trained successfully (cached)")
