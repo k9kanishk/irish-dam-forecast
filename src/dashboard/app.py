@@ -9,25 +9,6 @@ _SRC_DIR  = os.path.abspath(os.path.join(_THIS_DIR, ".."))   # -> .../src
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-DAM_EXCEL_CANDIDATES = [
-    Path("data/raw/dam_prices.xlsx"),
-    Path("data/raw/Dam Prices.xlsx"),
-    Path("src/data/raw/dam_prices.xlsx"),
-    Path("src/data/raw/Dam Prices.xlsx"),
-    Path("/mnt/data/Dam Prices.xlsx"),  # if you're running in a container like here
-]
-
-DAM_PARQUET_CACHE = Path("data/raw/dam_prices.parquet")
-
-def _find_dam_excel() -> Path:
-    for p in DAM_EXCEL_CANDIDATES:
-        if p.exists():
-            return p
-    raise FileNotFoundError(
-        "DAM Excel not found. Put it at data/raw/dam_prices.xlsx (recommended)."
-    )
-
-
 # ---- Standard libs
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -37,15 +18,13 @@ import time  # <-- add this
 # ---- Third-party
 import numpy as np
 import streamlit as st
-import yaml
 import requests
 
 # ---- Project imports (use 'data.*' / 'features.*' with our path bootstrap)
-# from data.entsoe_api import fetch_ie_dam_recent, fetch_ie_dam_chunked, Entsoe
-from data.entsoe_api import Entsoe    
-from data.weather import fetch_hourly
+from data.semopx_hrp60 import update_hrp60_cache, load_hrp60
 from features.build_features import build_feature_table
 from features.targets import make_day_ahead_target
+from models.xgb_model import make_model
 
 
 # -------------------- Page / Sidebar --------------------
@@ -64,78 +43,16 @@ DAYS = 21
 @st.cache_data(ttl=60*60, show_spinner=False)
 def build_dam_cached(days: int) -> pd.DataFrame:
     """
-    FAST: read DAM only from the cleaned Excel (auction,timestamp,price_eur),
-    and cache as Parquet for instant reloads.
-    Returns columns: ts_utc, dam_eur_mwh (UTC)
+    Update local parquet if stale (fast: only checks + fetches last ~14 days).
+    Returns columns: ts_utc, dam_eur_mwh (UTC).
     """
-    excel_path = _find_dam_excel()
+    update_hrp60_cache(days_back=max(14, days), max_age_minutes=15, bidding_area=None)
 
-    # If parquet exists and is newer than excel, load parquet (fastest)
-    if DAM_PARQUET_CACHE.exists():
-        if DAM_PARQUET_CACHE.stat().st_mtime >= excel_path.stat().st_mtime:
-            df = pd.read_parquet(DAM_PARQUET_CACHE)
-            df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True, errors="coerce")
-            df["dam_eur_mwh"] = pd.to_numeric(df["dam_eur_mwh"], errors="coerce")
-            df = df.dropna(subset=["ts_utc", "dam_eur_mwh"]).sort_values("ts_utc")
-        else:
-            df = None
-    else:
-        df = None
-
-    if df is None:
-        # Read ONLY required cols (fast)
-        raw = pd.read_excel(
-            excel_path,
-            sheet_name=0,
-            engine="openpyxl",
-            usecols=["auction", "timestamp", "price_eur"],
-        )
-
-        # Filter DAM rows just in case
-        raw["auction"] = raw["auction"].astype(str)
-        raw = raw[raw["auction"].str.upper().str.startswith("DAM")].copy()
-
-        raw["ts_utc"] = pd.to_datetime(raw["timestamp"], utc=True, errors="coerce")
-        raw["dam_eur_mwh"] = pd.to_numeric(raw["price_eur"], errors="coerce")
-
-        df = raw[["ts_utc", "dam_eur_mwh"]].dropna().sort_values("ts_utc")
-        df = df.drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
-
-        # Save parquet cache for next time
-        DAM_PARQUET_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(DAM_PARQUET_CACHE, index=False)
-
-    # Keep only last `days`
-    cutoff = df["ts_utc"].max() - pd.Timedelta(days=days)
-    df = df[df["ts_utc"] >= cutoff].reset_index(drop=True)
-    return df
+    df = load_hrp60(days=days, bidding_area=None)
+    df = df.rename(columns={"dam_60min_hrp_eur_mwh": "dam_eur_mwh"})
+    return df[["ts_utc", "dam_eur_mwh"]]
 
 
-
-@st.cache_data(ttl=60*30, show_spinner=False)
-def build_fundamentals_cached(start_local: pd.Timestamp, end_local: pd.Timestamp, lat: float, lon: float):
-    """
-    Pull load forecast, wind/solar forecast, and weather; return as dict.
-    Cached so we don’t refetch on every UI change.
-    """
-    e = Entsoe()  # uses ENTSOE_TOKEN
-    # ENTSO-E fundamentals
-    try:
-        load_fc = e.load_forecast(start_local, end_local)           # Series (tz-aware)
-    except Exception:
-        load_fc = pd.Series(dtype=float, name="load_forecast_mw")
-    try:
-        ws_fc   = e.wind_solar_forecast(start_local, end_local)     # DataFrame
-    except Exception:
-        ws_fc = pd.DataFrame()
-
-    # Weather (Open-Meteo in your project)
-    try:
-        weather = fetch_hourly(lat, lon, str(start_local.date()), str(end_local.date()))
-    except Exception:
-        weather = pd.DataFrame()
-
-    return {"load_fc": load_fc, "ws_fc": ws_fc, "weather": weather}
 
 @st.cache_data(ttl=60*30, show_spinner=False)
 def build_features_cached(dam_series: pd.Series, load_fc: pd.Series, ws_fc: pd.DataFrame, weather: pd.DataFrame):
@@ -149,20 +66,10 @@ def build_features_cached(dam_series: pd.Series, load_fc: pd.Series, ws_fc: pd.D
 from xgboost import XGBRegressor
 
 @st.cache_resource
-def fit_model_cached(X: pd.DataFrame, y: pd.Series, params: dict | None = None):
-    """
-    Train once per unique (X,y,params) state and reuse the fitted model.
-    Use cache_resource for non-serializable objects like sklearn/xgb models.
-    """
-    if params is None:
-        params = dict(
-            n_estimators=800, max_depth=6, learning_rate=0.04,
-            subsample=0.8, colsample_bytree=0.8, reg_lambda=5.0,
-            tree_method="hist", objective="reg:squarederror"
-        )
-    model = XGBRegressor(**params)
-    model.fit(X, y)
-    return model
+def train_model_cached(X: pd.DataFrame, y: pd.Series, key: str):
+    m = make_model()
+    m.fit(X, y)
+    return m
 
 # -------------------- EirGrid Backup indicator (UI only) --------------------
 class EirGridBackup:
@@ -198,15 +105,6 @@ def ensure_dataset():
                 st.write("✅ Using cached dataset on disk (fresh <10m).")
                 status.update(label="Done", state="complete")
                 return
-
-        # Load config (lat/lon for weather)
-        try:
-            with open("config.yaml", "r") as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception:
-            cfg = {}
-        lat = cfg.get("weather", {}).get("lat", 53.4)
-        lon = cfg.get("weather", {}).get("lon", -8.2)
 
         # -------- DAM prices (cached wrappers) --------
         st.write("🔹 Fetching DAM prices…")
@@ -282,49 +180,10 @@ def ensure_dataset():
             status.update(label="Done (minimal features)", state="complete")
             return
 
-        # -------- Fundamentals window from DAM range --------
-        min_dt_local = dam_df["ts_utc"].min().tz_convert("Europe/Dublin")
-        max_dt_local = dam_df["ts_utc"].max().tz_convert("Europe/Dublin")
-        start_local = min_dt_local.normalize()
-        end_local   = max_dt_local.normalize()
-
-        st.write(f"🔹 Fundamentals window: {start_local.date()} → {end_local.date()}")
-
-        # -------- Fundamentals (cached) --------
-        st.write("🔹 Fetching load/wind/solar/weather…")
-        funds = build_fundamentals_cached(start_local, end_local, lat, lon)
-        load_fc = funds["load_fc"]
-        ws_fc   = funds["ws_fc"]
-        weather = funds["weather"]
-
-        # Convert to Dublin tz-naive to align with your feature builder
-        def _to_dublin_naive(x):
-            """Ensure index is tz-naive Europe/Dublin, if possible."""
-            if not hasattr(x, "index"):
-                return x
-
-            idx = x.index
-
-            # Make sure we have a DatetimeIndex first
-            if not isinstance(idx, pd.DatetimeIndex):
-                try:
-                    idx = pd.to_datetime(idx, utc=True, errors="coerce")
-                except Exception:
-                    return x  # can't interpret as dates, just return unchanged
-
-            # Now handle time zones
-            if idx.tz is not None:
-                idx = idx.tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
-            else:
-                idx = idx.tz_localize("UTC").tz_convert(ZoneInfo("Europe/Dublin")).tz_localize(None)
-
-            x.index = idx
-            return x
-
-
-        load_fc = _to_dublin_naive(load_fc)
-        ws_fc   = _to_dublin_naive(ws_fc)
-        weather = _to_dublin_naive(weather)
+        # -------- Fundamentals skipped (fast path) --------
+        load_fc = pd.Series(dtype=float, name="load_forecast_mw")
+        ws_fc = pd.DataFrame()
+        weather = pd.DataFrame()
 
         # Deduplicate indices
         dam_series = dam_series[~dam_series.index.duplicated(keep="last")]
@@ -409,6 +268,7 @@ def ensure_dataset():
 with st.sidebar:
     st.header("📊 Data Management")
     if st.button("⟳ Refresh latest prices (no full rebuild)"):
+        update_hrp60_cache(days_back=14, max_age_minutes=0)
         st.cache_data.clear()
         st.rerun()
 
@@ -433,7 +293,7 @@ with st.sidebar:
     if EirGridBackup.get_recent_data():
         st.success("✅ EirGrid backup available")
     else:
-        st.info("ℹ️ Using ENTSO-E only")
+        st.info("ℹ️ Using SEMOpx HRP only")
 
 # -------------------- Build/load dataset --------------------
 ensure_dataset()
@@ -456,34 +316,8 @@ with st.sidebar:
 # -------------------- Train model --------------------
 y = df.pop("target") if "target" in df.columns else pd.Series(index=df.index)
 
-model = None
-try:
-    # Import with repo root on sys.path (path bootstrap at the top adds it)
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.append(str(REPO_ROOT))
-    from src.models.xgb_model import make_model  # project helper if present
-    model = make_model()
-    model.fit(df, y)
-    st.success("✅ Model trained successfully (XGBoost helper)")
-except Exception as e:
-    st.warning(f"XGBoost helper failed ({e}); using plain XGBoost")
-    try:
-        model = fit_model_cached(df, y)
-        st.success("✅ Model trained successfully (XGBoost)")
-    except Exception as e2:
-        st.warning(f"XGBoost failed ({e2}); using Random Forest")
-        try:
-            from sklearn.ensemble import RandomForestRegressor
-            model = RandomForestRegressor(n_estimators=200, max_depth=12, random_state=42)
-            model.fit(df, y)
-            st.success("✅ Model trained successfully (Random Forest)")
-        except Exception as e3:
-            st.error(f"Model training failed: {e3}")
-            st.stop()
-
 # -------------------- UI: date selection --------------------
-st.title("⚡ Irish Day-Ahead Power Price Forecast (SEMOpx/ENTSO-E)")
+st.title("⚡ Irish Day-Ahead Power Price Forecast (SEMOpx HRP60)")
 
 date_min = df.index.min().date()
 date_max = df.index.max().date()
@@ -495,8 +329,27 @@ selected_date = st.date_input(
     help=f"Data available from {date_min} to {date_max}"
 )
 
+# -------------------- Train model (no leakage) --------------------
+train_mask = df.index.date < selected_date
+test_mask = df.index.date == selected_date
+
+X_train, y_train = df.loc[train_mask], y.loc[train_mask]
+X_test = df.loc[test_mask]
+
+if X_train.empty:
+    st.error("Not enough historical data to train before the selected date.")
+    st.stop()
+
+key = str(df.index.max())
+try:
+    model = train_model_cached(X_train, y_train, key)
+    st.success("✅ Model trained successfully (cached)")
+except Exception as e:
+    st.error(f"Model training failed: {e}")
+    st.stop()
+
 # -------------------- Forecast for selected date --------------------
-day_data = df[df.index.date == selected_date]
+day_data = X_test
 
 if not day_data.empty:
     preds = model.predict(day_data)
@@ -637,4 +490,4 @@ with st.expander("🔍 Model Performance"):
 
 # -------------------- Footer --------------------
 st.markdown("---")
-st.caption("💡 Data: SEMOpx (HRP) / ENTSO-E | Weather: Open-Meteo | Built with Streamlit")
+st.caption("💡 Data: SEMOpx (HRP60) | Built with Streamlit")
