@@ -135,169 +135,122 @@ def _localname(tag: str) -> str:
 
 def _parse_hrp60_xml(raw: bytes, debug: bool = False) -> pd.DataFrame:
     """
-    Robust parser for SEMOpx DAM 60Min Harmonised Reference Price XML.
+    Parse SEMOpx DAM_60MinHarmonisedReferencePrice XML.
 
-    Handles:
-    - No <TimeSeries> present
-    - <Period> blocks anywhere in the document
-    - Points with either:
-        a) explicit datetime per point, OR
-        b) position + period start + resolution
+    Observed tags (from your debug):
+      - TimeSeries (2)
+      - Interval (48 total, likely 24 per series)
+      - StartTime (timestamp)
+      - MarketPriceRoundedAmount (EUR/MWh)
 
-    Returns:
-      ts_utc (UTC), dam_60min_hrp_eur_mwh (float)
+    Returns columns:
+      ts_utc (UTC), dam_60min_hrp_eur_mwh (float), bidding_area (str|None)
     """
     root = ET.fromstring(raw)
 
     def lname(tag: str) -> str:
         return tag.split("}", 1)[-1] if "}" in tag else tag
 
-    # Collect all tags if debug
-    if debug:
-        tags = [lname(el.tag).lower() for el in root.iter()]
-        from collections import Counter
-        top = Counter(tags).most_common(30)
-        print("[DEBUG] Top XML tags:", top)
-
-    # Find ALL Period elements anywhere (not just inside TimeSeries)
-    periods = [el for el in root.iter() if lname(el.tag).lower() == "period"]
-    if not periods:
-        # Some SEMO files use "PeriodTimeInterval" or similar naming
-        periods = [el for el in root.iter() if "period" in lname(el.tag).lower()]
-
-    def parse_resolution(res_txt: str | None) -> pd.Timedelta:
-        if not res_txt:
-            return pd.Timedelta(hours=1)
-        r = res_txt.strip().upper()
-        if r in ("PT60M", "PT1H"):
-            return pd.Timedelta(hours=1)
-        if r == "PT30M":
-            return pd.Timedelta(minutes=30)
-        # fallback
-        return pd.Timedelta(hours=1)
-
-    def extract_text(el: ET.Element) -> str:
+    def val(el: ET.Element) -> str:
+        # SEMO sometimes uses attributes like v="..."
+        if "v" in el.attrib:
+            return str(el.attrib["v"]).strip()
         return (el.text or "").strip()
 
-    def find_first_datetime(node: ET.Element) -> Optional[pd.Timestamp]:
-        """
-        Search descendants for something that looks like a timestamp.
-        """
-        for el in node.iter():
-            n = lname(el.tag).lower()
-            if any(k in n for k in ["datetime", "timestamp", "time", "start"]):
-                txt = extract_text(el)
-                # accept ISO strings like 2026-01-13T23:00:00Z
-                ts = pd.to_datetime(txt, utc=True, errors="coerce")
-                if not pd.isna(ts):
-                    return ts
-        return None
+    if debug:
+        from collections import Counter
+        tags = [lname(el.tag).lower() for el in root.iter()]
+        print("[DEBUG] Top XML tags:", Counter(tags).most_common(30))
 
-    def find_first_float(node: ET.Element) -> Optional[float]:
-        """
-        Search descendants for a numeric value in tags that look like price fields.
-        """
-        for el in node.iter():
-            n = lname(el.tag).lower()
-            if any(k in n for k in ["price", "amount", "eur", "mwh", "reference"]):
-                txt = extract_text(el)
-                try:
-                    return float(txt)
-                except Exception:
-                    continue
-        return None
+    # Find all TimeSeries blocks (case-insensitive)
+    ts_blocks = [el for el in root.iter() if "timeseries" == lname(el.tag).lower()]
+    if not ts_blocks:
+        # fallback: sometimes "TimeSeries" is nested or slightly named
+        ts_blocks = [el for el in root.iter() if "timeseries" in lname(el.tag).lower()]
 
     frames = []
 
-    for period in periods:
-        # find period start + resolution (where possible)
-        start_ts = None
-        step = pd.Timedelta(hours=1)
-
-        # Many SEMO docs store values in attributes v="..."
-        def get_v_or_text(el: ET.Element) -> str:
-            if "v" in el.attrib:
-                return str(el.attrib["v"]).strip()
-            return extract_text(el)
-
-        for el in period.iter():
-            n = lname(el.tag).lower()
-            if n == "start":
-                start_ts = pd.to_datetime(get_v_or_text(el), utc=True, errors="coerce")
-            elif "resolution" in n:
-                step = parse_resolution(get_v_or_text(el))
-
-        # Identify "point-like" nodes
-        point_nodes = []
-        for el in period:
-            n = lname(el.tag).lower()
-            if n in ("point", "row", "entry", "interval"):
-                point_nodes.append(el)
-
-        # If points are nested deeper
-        if not point_nodes:
-            point_nodes = [
-                el for el in period.iter()
-                if lname(el.tag).lower() in ("point", "row", "entry", "interval")
-            ]
+    # Helper: parse one TimeSeries
+    def parse_one_timeseries(ts_el: ET.Element) -> pd.DataFrame:
+        bidding_area = None
+        for el in ts_el.iter():
+            if lname(el.tag).lower() == "biddingarea":
+                bidding_area = val(el)
+                break
 
         rows = []
+        for interval in ts_el.iter():
+            if lname(interval.tag).lower() != "interval":
+                continue
 
-        for pt in point_nodes:
-            # Try explicit timestamp in point first
-            ts = find_first_datetime(pt)
+            start_txt = None
+            price_txt = None
 
-            # Try position-based time if no explicit timestamp
-            pos = None
-            if ts is None and start_ts is not None:
-                for el in pt.iter():
-                    n = lname(el.tag).lower()
-                    if n in ("position", "seq", "sequence", "index"):
-                        txt = get_v_or_text(el)
-                        try:
-                            pos = int(txt)
-                        except Exception:
-                            pos = None
-                        break
-                if pos is not None:
-                    ts = start_ts + (pos - 1) * step
+            for child in interval.iter():
+                n = lname(child.tag).lower()
+                if n == "starttime":
+                    start_txt = val(child)
+                elif n == "marketpriceroundedamount":
+                    price_txt = val(child)
 
-            price = find_first_float(pt)
+            if not start_txt or not price_txt:
+                continue
 
-            if ts is not None and price is not None:
-                rows.append((ts, price))
+            ts = pd.to_datetime(start_txt, utc=True, errors="coerce")
+            try:
+                pr = float(price_txt)
+            except Exception:
+                pr = None
 
+            if ts is not pd.NaT and pr is not None:
+                rows.append((ts, pr, bidding_area))
+
+        if not rows:
+            return pd.DataFrame(columns=["ts_utc", "dam_60min_hrp_eur_mwh", "bidding_area"])
+
+        return pd.DataFrame(rows, columns=["ts_utc", "dam_60min_hrp_eur_mwh", "bidding_area"])
+
+    if ts_blocks:
+        for ts_el in ts_blocks:
+            df = parse_one_timeseries(ts_el)
+            if not df.empty:
+                frames.append(df)
+    else:
+        # No TimeSeries blocks found -> parse Intervals globally (rare)
+        rows = []
+        for interval in root.iter():
+            if lname(interval.tag).lower() != "interval":
+                continue
+            start_txt = None
+            price_txt = None
+            for child in interval.iter():
+                n = lname(child.tag).lower()
+                if n == "starttime":
+                    start_txt = val(child)
+                elif n == "marketpriceroundedamount":
+                    price_txt = val(child)
+            if not start_txt or not price_txt:
+                continue
+            ts = pd.to_datetime(start_txt, utc=True, errors="coerce")
+            try:
+                pr = float(price_txt)
+            except Exception:
+                pr = None
+            if ts is not pd.NaT and pr is not None:
+                rows.append((ts, pr, None))
         if rows:
-            tmp = pd.DataFrame(rows, columns=["ts_utc", "dam_60min_hrp_eur_mwh"])
-            frames.append(tmp)
+            frames.append(pd.DataFrame(rows, columns=["ts_utc", "dam_60min_hrp_eur_mwh", "bidding_area"]))
 
     if not frames:
-        # Last-resort: scan ALL nodes for (datetime, price) pairs by proximity
-        # (Better than returning empty)
-        all_nodes = list(root.iter())
-        pairs = []
-        for node in all_nodes:
-            ts = find_first_datetime(node)
-            pr = find_first_float(node)
-            if ts is not None and pr is not None:
-                pairs.append((ts, pr))
-        if pairs:
-            out = pd.DataFrame(pairs, columns=["ts_utc", "dam_60min_hrp_eur_mwh"])
-            out = out.dropna().sort_values("ts_utc").drop_duplicates("ts_utc", keep="last")
-            out["ts_utc"] = pd.to_datetime(out["ts_utc"], utc=True)
-            out["dam_60min_hrp_eur_mwh"] = pd.to_numeric(out["dam_60min_hrp_eur_mwh"], errors="coerce")
-            return out.reset_index(drop=True)
-
-        raise RuntimeError(
-            "Parsed XML but could not find any timestamp/price pairs. "
-            "Run with --debug to inspect tags."
-        )
+        raise RuntimeError("Parsed XML but found no Interval(StartTime, MarketPriceRoundedAmount) rows.")
 
     out = pd.concat(frames, ignore_index=True)
     out["ts_utc"] = pd.to_datetime(out["ts_utc"], utc=True, errors="coerce")
     out["dam_60min_hrp_eur_mwh"] = pd.to_numeric(out["dam_60min_hrp_eur_mwh"], errors="coerce")
-    out = out.dropna().sort_values("ts_utc")
-    out = out.drop_duplicates("ts_utc", keep="last").reset_index(drop=True)
+    out = out.dropna(subset=["ts_utc", "dam_60min_hrp_eur_mwh"]).sort_values("ts_utc")
+
+    # If there are duplicates (e.g., overlapping time series), keep last
+    out = out.drop_duplicates(["ts_utc", "bidding_area"], keep="last").reset_index(drop=True)
     return out
 
 
@@ -334,6 +287,7 @@ def main() -> int:
     ap.add_argument("--out_csv", default=str(DEFAULT_OUT_CSV))
     ap.add_argument("--out_parquet", default=str(DEFAULT_OUT_PARQUET))
     ap.add_argument("--debug", action="store_true", help="Print XML tag histogram when parsing")
+    ap.add_argument("--bidding_area", default=None, help="Optional: filter to one bidding area code from the XML")
     args = ap.parse_args()
 
     start = dt.date.fromisoformat(args.start)
@@ -365,6 +319,12 @@ def main() -> int:
         except Exception as e:
             print(f"[WARN] Failed parsing {item.resource_name} for {d_str}: {e}", file=sys.stderr)
             continue
+
+        if args.bidding_area:
+            df = df[df["bidding_area"].astype(str) == args.bidding_area]
+
+        if args.debug and "bidding_area" in df.columns and not df.empty:
+            print("[DEBUG] bidding_area values:", df["bidding_area"].dropna().unique().tolist())
 
         df["trade_date"] = d_str
         all_days.append(df)
