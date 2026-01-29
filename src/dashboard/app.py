@@ -137,11 +137,11 @@ with st.sidebar:
     if DATA_PATH.exists():
         mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
         age_h = (datetime.now() - mod_time).total_seconds() / 3600
-        st.markdown(f\"**Dataset**: updated {mod_time.strftime('%Y-%m-%d %H:%M')} ({age_h:.1f}h ago)\")
+        st.markdown(f"**Dataset**: updated {mod_time.strftime('%Y-%m-%d %H:%M')} ({age_h:.1f}h ago)")
     else:
-        st.warning(\"train.parquet missing. App will build it from HRP60 file (if present).\")
+        st.warning("train.parquet missing. App will build it from HRP60 file (if present).")
 
-    DAYS = st.slider(\"History window (days)\", 7, 365, 60)
+    DAYS = st.slider("History window (days)", 7, 365, 60)
 
 # -------------------- Build/load dataset --------------------
 ensure_dataset(DAYS)
@@ -188,7 +188,7 @@ if X_train.empty:
     st.error("Not enough historical data to train before the selected date.")
     st.stop()
 
-key = f\"{df.index.max()}_{selected_date}\"
+key = f"{df.index.max()}_{selected_date}"
 try:
     model = train_model_cached(X_train, y_train, key)
     st.success("✅ Model trained successfully (cached)")
@@ -264,7 +264,6 @@ with st.expander("🔍 Model Performance"):
 
         # Try helper; fall back to xgb
         try:
-            from src.models.xgb_model import make_model
             test_model = make_model()
         except Exception:
             test_model = XGBRegressor(
